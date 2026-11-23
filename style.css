@@ -1,0 +1,552 @@
+/* ==========================================================================
+   1. Theme variables
+   All colors live here. JavaScript only switches data-theme on <html>.
+   Every text color meets WCAG AA (4.5:1) against its background.
+   ========================================================================== */
+:root {
+  --bg: #16181d;
+  --surface: #1f2228;
+  --border: #2e323a;
+  --text: #e8eaed;          /* typed-correct text, headings */
+  --text-dim: #8b919a;      /* untyped text, labels */
+  --accent: #f2c14e;        /* caret, active button */
+  --accent-contrast: #16181d;
+  --error: #ff7070;
+  --error-bg: rgba(255, 112, 112, 0.28);
+  --focus: #7cc4ff;
+
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --radius: 10px;
+
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg: #f6f5f1;
+  --surface: #ffffff;
+  --border: #dcd9d2;
+  --text: #1d1f23;
+  --text-dim: #5c6168;
+  --accent: #9a5b00;
+  --accent-contrast: #ffffff;
+  --error: #c0262d;
+  --error-bg: rgba(192, 38, 45, 0.18);
+  --focus: #1a5fb4;
+
+  color-scheme: light;
+}
+
+/* ==========================================================================
+   2. Base
+   ========================================================================== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  line-height: 1.5;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+kbd {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  padding: 0.05em 0.4em;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+/* Visible focus for keyboard users, in both themes. */
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.muted {
+  color: var(--text-dim);
+}
+
+/* ==========================================================================
+   3. Layout
+   ========================================================================== */
+.site-header,
+.container,
+.site-footer {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 1.25rem;
+  padding-bottom: 1.25rem;
+}
+
+.logo {
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.logo-accent {
+  color: var(--accent);
+}
+
+.container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding-top: 1rem;
+  padding-bottom: 2rem;
+}
+
+.site-footer {
+  padding-top: 1rem;
+  padding-bottom: 1.5rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+}
+
+.card-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: lowercase;
+  margin-bottom: 1rem;
+}
+
+/* ==========================================================================
+   4. Buttons
+   ========================================================================== */
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  font-size: 1.15rem;
+  line-height: 1;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.primary-btn {
+  display: block;
+  width: 100%;
+  margin-top: 1.25rem;
+  padding: 0.8rem 1rem;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 700;
+  transition: filter 0.15s ease;
+}
+
+.primary-btn:hover {
+  filter: brightness(1.08);
+}
+
+/* ==========================================================================
+   5. Toolbar: duration settings + live stats
+   ========================================================================== */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.settings {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: opacity 0.2s ease;
+}
+
+.settings-label {
+  padding: 0 0.6rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+.setting-btn {
+  min-width: 2.75rem;
+  padding: 0.4rem 0.7rem;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.setting-btn:hover {
+  color: var(--text);
+}
+
+.setting-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 700;
+}
+
+/* While a test runs the settings fade back (still clickable to restart). */
+body[data-phase="running"] .settings {
+  opacity: 0.4;
+}
+
+body[data-phase="running"] .settings:hover,
+body[data-phase="running"] .settings:focus-within {
+  opacity: 1;
+}
+
+.live-stats {
+  display: flex;
+  gap: 1.25rem;
+  margin: 0;
+  font-family: var(--font-mono);
+}
+
+.live-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.live-stat dt {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.live-stat dd {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.live-stat--timer dd {
+  color: var(--accent);
+}
+
+/* ==========================================================================
+   6. Typing area
+   ========================================================================== */
+.typing-area {
+  position: relative;
+  padding: 1.25rem;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  transition: border-color 0.15s ease;
+  cursor: text;
+}
+
+/* The hidden input holds focus, so show focus on the whole area instead. */
+.typing-area:focus-within {
+  border-color: var(--border);
+}
+
+/* Exactly three lines are visible. The font size is set here so that the
+   em-based height and the em-based line-height below stay in sync. */
+.words-viewport {
+  position: relative;
+  font-size: clamp(1.15rem, 3.8vw, 1.6rem);
+  height: 4.8em;            /* 3 lines x 1.6em */
+  overflow: hidden;
+}
+
+/* The track moves up one line at a time (translateY set by JS). It is the
+   positioned parent of the character spans, so offsetLeft/offsetTop of each
+   span are measured from here. */
+.words-track {
+  position: relative;
+  transition: transform 0.15s ease;
+}
+
+.words {
+  font-family: var(--font-mono);
+  line-height: 1.6em;
+  color: var(--text-dim);
+  /* Keep every space its real width and only wrap between words. */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  user-select: none;
+}
+
+.char.correct {
+  color: var(--text);
+}
+
+/* Color alone is not enough for color-blind users, so errors are underlined too. */
+.char.incorrect {
+  color: var(--error);
+  text-decoration: underline;
+  text-decoration-color: var(--error);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.2em;
+}
+
+/* A space has no glyph, so a wrong space would be invisible without this. */
+.char.space.incorrect {
+  background: var(--error-bg);
+  border-radius: 3px;
+}
+
+/* The floating caret. JS moves it with transform: translate(x, y). */
+.caret {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2px;
+  height: 1.2em;
+  margin-left: -1px;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+  transition: transform 0.09s linear;
+}
+
+/* Blink only while waiting; stay solid while typing. */
+body[data-phase="idle"] .caret {
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Off-screen but focusable. font-size 16px stops iOS from zooming on focus. */
+.hidden-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  font-size: 16px;
+  pointer-events: none;
+  caret-color: transparent;
+}
+
+.typing-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.hint {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+/* ==========================================================================
+   7. Results card
+   ========================================================================== */
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin: 0;
+  font-family: var(--font-mono);
+}
+
+.result dt {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.result dd {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.result--main {
+  grid-column: span 1;
+}
+
+.result--main dd {
+  font-size: 3rem;
+  line-height: 1.1;
+  color: var(--accent);
+}
+
+.best-badge {
+  margin-top: 1rem;
+  color: var(--text-dim);
+  font-size: 0.95rem;
+}
+
+.best-badge.is-new {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* ==========================================================================
+   8. History
+   ========================================================================== */
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+.history-item {
+  display: grid;
+  grid-template-columns: 1fr 1fr 0.6fr 1.6fr;
+  gap: 0.5rem;
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.history-item:first-child {
+  border-top: 0;
+}
+
+.history-wpm {
+  font-weight: 700;
+}
+
+.history-date {
+  color: var(--text-dim);
+  text-align: right;
+}
+
+/* ==========================================================================
+   9. Small screens (down to 360px)
+   ========================================================================== */
+@media (max-width: 600px) {
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .settings {
+    justify-content: center;
+  }
+
+  .live-stats {
+    justify-content: space-between;
+  }
+
+  .live-stat {
+    align-items: center;
+  }
+
+  .typing-area {
+    padding: 0.75rem 0.25rem;
+  }
+
+  .result-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .result--main dd {
+    font-size: 2.25rem;
+  }
+
+  .history-item {
+    grid-template-columns: 1fr 1fr 0.6fr;
+  }
+
+  .history-date {
+    grid-column: 1 / -1;
+    text-align: left;
+    font-size: 0.8rem;
+  }
+}
+
+/* ==========================================================================
+   10. Reduced motion
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  .caret,
+  .words-track,
+  body {
+    transition: none;
+  }
+
+  body[data-phase="idle"] .caret {
+    animation: none;
+  }
+}

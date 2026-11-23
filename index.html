@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Typing Speed Tester</title>
+  <meta name="description" content="A fast, minimal typing speed test built with vanilla HTML, CSS and JavaScript.">
+
+  <!-- Apply the saved theme before first paint so the page never flashes the wrong colors. -->
+  <script>
+    (function () {
+      var theme = null;
+      try { theme = JSON.parse(localStorage.getItem('typing:theme')); } catch (e) { theme = null; }
+      if (theme !== 'light' && theme !== 'dark') {
+        theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', theme);
+    })();
+  </script>
+
+  <link rel="stylesheet" href="style.css">
+  <script src="words.js" defer></script>
+  <script src="script.js" defer></script>
+</head>
+<body data-phase="idle">
+  <header class="site-header">
+    <h1 class="logo">type<span class="logo-accent">speed</span></h1>
+    <button id="theme-toggle" class="icon-btn" type="button" aria-label="Switch to light theme">
+      <span aria-hidden="true">◐</span>
+    </button>
+  </header>
+
+  <main class="container">
+    <section class="toolbar" aria-label="Test settings and live stats">
+      <div id="settings" class="settings" role="group" aria-label="Test duration in seconds">
+        <span class="settings-label" aria-hidden="true">time</span>
+        <button type="button" class="setting-btn" data-duration="15" aria-pressed="false">15</button>
+        <button type="button" class="setting-btn" data-duration="30" aria-pressed="false">30</button>
+        <button type="button" class="setting-btn" data-duration="60" aria-pressed="false">60</button>
+      </div>
+
+      <dl class="live-stats">
+        <div class="live-stat live-stat--timer">
+          <dt>time</dt>
+          <dd id="timer" role="timer">30</dd>
+        </div>
+        <div class="live-stat">
+          <dt>wpm</dt>
+          <dd id="live-wpm">0</dd>
+        </div>
+        <div class="live-stat">
+          <dt>acc</dt>
+          <dd id="live-acc">--</dd>
+        </div>
+        <div class="live-stat">
+          <dt>best</dt>
+          <dd id="live-best">--</dd>
+        </div>
+      </dl>
+    </section>
+
+    <section id="typing-area" class="typing-area" aria-label="Typing test. Start typing to begin.">
+      <div class="words-viewport">
+        <div id="words-track" class="words-track">
+          <div id="caret" class="caret" aria-hidden="true"></div>
+          <div id="words" class="words"></div>
+        </div>
+      </div>
+
+      <!-- Mobile only: tapping the text focuses this input so the on-screen keyboard opens. -->
+      <input id="hidden-input" class="hidden-input" type="text"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             aria-label="Typing input">
+
+      <div class="typing-footer">
+        <p class="hint">Start typing to begin · <kbd>Tab</kbd> to restart</p>
+        <button id="restart-inline" class="icon-btn" type="button" aria-label="Restart test with new words">
+          <span aria-hidden="true">↻</span>
+        </button>
+      </div>
+    </section>
+
+    <section id="results" class="results card" aria-labelledby="results-title" hidden>
+      <h2 id="results-title" class="card-title">Results</h2>
+      <dl class="result-grid">
+        <div class="result result--main">
+          <dt>wpm</dt>
+          <dd id="res-wpm">0</dd>
+        </div>
+        <div class="result result--main">
+          <dt>accuracy</dt>
+          <dd id="res-acc">0%</dd>
+        </div>
+        <div class="result">
+          <dt>raw wpm</dt>
+          <dd id="res-raw">0</dd>
+        </div>
+        <div class="result">
+          <dt>characters</dt>
+          <dd id="res-chars">0 / 0</dd>
+        </div>
+        <div class="result">
+          <dt>time</dt>
+          <dd id="res-time">30s</dd>
+        </div>
+      </dl>
+      <p id="res-best" class="best-badge"></p>
+      <button id="restart-btn" class="primary-btn" type="button">Restart test</button>
+    </section>
+
+    <section class="history card" aria-labelledby="history-title">
+      <h2 id="history-title" class="card-title">Recent results</h2>
+      <p id="history-empty" class="muted">No results yet. Finish a test to see it here.</p>
+      <ol id="history-list" class="history-list"></ol>
+    </section>
+
+    <!-- Screen readers announce changes to this region (the final results). -->
+    <p id="announcer" class="visually-hidden" aria-live="polite" aria-atomic="true"></p>
+  </main>
+
+  <footer class="site-footer">
+    <p>Built with vanilla HTML, CSS &amp; JavaScript.</p>
+  </footer>
+</body>
+</html>
