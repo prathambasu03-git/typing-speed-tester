@@ -12,6 +12,22 @@
              finished -> idle (restart)
    ========================================================================== */
 
+/* ---------- 0. Dependency guard ---------- */
+
+// stats.js missing (e.g. a 404): show a message, then throw, because the rest
+// of this file would otherwise fail at its first use with no visible error.
+if (typeof DURATIONS === 'undefined' || typeof computeStats !== 'function' ||
+    typeof generateChars !== 'function' || typeof isValidRecord !== 'function') {
+  const loadError = document.getElementById('load-error');
+  const input = document.getElementById('hidden-input');
+  if (loadError) {
+    loadError.hidden = false; // unhide before writing so the alert is announced
+    loadError.textContent = 'The app could not be loaded. Please reload the page.';
+  }
+  if (input) input.disabled = true;
+  throw new Error('stats.js failed to load');
+}
+
 /* ---------- 1. Configuration ---------- */
 
 const CONFIG = Object.freeze({
@@ -222,6 +238,10 @@ function renderText() {
  * Screen-reader copy of the text: one string instead of one span per char.
  * Only the next few untyped words, so the description stays short and is not
  * re-read from the first word every time focus returns to the input.
+ * It is the input's aria-describedby, so it is NOT updated per keystroke
+ * (that makes some screen readers re-read it after every key). It is written
+ * on each new test and when the input loses focus, so it is current whenever
+ * focus comes back.
  */
 function renderWordsText() {
   dom.wordsText.textContent = state.chars
@@ -256,12 +276,9 @@ function renderCaret(previousIndex) {
     spans[previousIndex].classList.remove('current');
   }
   const span = spans[state.index];
-  if (span) {
-    span.classList.add('current');
-    positionCaret(span);
-  }
-  // Every caret move (typing and Backspace) changes what is left to type.
-  renderWordsText();
+  if (!span) return;
+  span.classList.add('current');
+  positionCaret(span);
 }
 
 function positionCaret(span) {
@@ -397,7 +414,11 @@ function renderLoadError() {
   dom.loadError.textContent = 'The word list could not be loaded. Please reload the page.';
   dom.hint.hidden = true; // "Start typing" would be wrong here
   dom.typingArea.setAttribute('aria-label', 'Typing test unavailable');
-  for (const button of dom.settingButtons) button.disabled = true;
+  for (const button of dom.settingButtons) {
+    button.disabled = true;
+    // A disabled button has no pressed look, so don't expose it as pressed.
+    button.removeAttribute('aria-pressed');
+  }
   dom.input.disabled = true;
   dom.restartInline.hidden = true;
 }
@@ -568,7 +589,6 @@ function extendTextIfNeeded() {
   state.chars.push(...more);
   state.results.push(...new Array(more.length).fill(null));
   appendCharSpans(more);
-  renderWordsText();
 }
 
 /* ---------- 10. Input handling ---------- */
@@ -734,6 +754,8 @@ function init() {
   // Pasted text is not typing (see handleMobileInput); block it at the source.
   dom.input.addEventListener('paste', blockDefault);
   dom.input.addEventListener('drop', blockDefault);
+  // Refresh the input's description (see renderWordsText) while focus is away.
+  dom.input.addEventListener('blur', renderWordsText);
   dom.typingArea.addEventListener('click', focusInput);
   dom.settings.addEventListener('click', handleSettingsClick); // event delegation
   dom.restartBtn.addEventListener('click', () => restart());
