@@ -2,9 +2,8 @@
 
 A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript. It has no frameworks, no build step and no dependencies, and it comes with 112 unit tests that run on plain Node.
 
-**Live demo:** `https://<your-username>.github.io/typing-test/` <!-- TODO: replace with the real GitHub Pages URL -->
+**Live demo:** [https://prathambasu03.github.io/typing-speed-tester/](https://prathambasu03.github.io/typing-speed-tester/)
 
-<!-- TODO: add a screenshot at docs/screenshot.png (the file does not exist yet) -->
 ![Typing test in the dark theme, showing the word area, live WPM, accuracy and the countdown timer](docs/screenshot.png)
 
 ## Features
