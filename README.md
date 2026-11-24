@@ -128,14 +128,14 @@ tests/stats.test.js  112 unit tests for stats.js
 
 ## Deploy to GitHub Pages
 
-1. Create an empty repository on GitHub, for example `typing-test`.
+1. Create an empty repository on GitHub, named `typing-speed-tester`.
 2. Push this project:
    ```bash
-   git remote add origin https://github.com/<your-username>/typing-test.git
+   git remote add origin https://github.com/prathambasu03/typing-speed-tester.git
    git push -u origin main
    ```
 3. On GitHub, open **Settings → Pages**. Under **Build and deployment**, choose **Deploy from a branch**, then pick branch `main` and folder `/ (root)`. Click **Save**.
-4. After about a minute the site is live at `https://<your-username>.github.io/typing-test/`.
+4. After about a minute the site is live at https://prathambasu03.github.io/typing-speed-tester/.
 
 ## What I would add next
 
