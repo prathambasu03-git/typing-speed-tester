@@ -17,14 +17,21 @@ function isValidDuration(value, durations = DURATIONS) {
   return durations.includes(value);
 }
 
-/** True for a stored result that is safe to display (wpm, accuracy, duration). */
+/** True for a stored result that is safe to display (wpm, accuracy, duration, date). */
 function isValidRecord(record) {
+  // Ranges reject hand-edited or corrupted storage that would show nonsense
+  // (negative speeds, 5000% accuracy). `date` is saved as a Date.now() number.
   return (
     record !== null &&
     typeof record === 'object' &&
     Number.isFinite(record.wpm) &&
+    record.wpm >= 0 &&
+    record.wpm <= 1000 &&
     Number.isFinite(record.accuracy) &&
-    isValidDuration(record.duration)
+    record.accuracy >= 0 &&
+    record.accuracy <= 100 &&
+    isValidDuration(record.duration) &&
+    Number.isFinite(record.date)
   );
 }
 
@@ -92,7 +99,9 @@ function computeStats(snapshot, elapsedMs) {
   return {
     wpm: Math.round(calculateWpm(correctChars, elapsedMs)),
     rawWpm: Math.round(calculateWpm(snapshot.totalKeystrokes, elapsedMs)),
-    accuracy: Math.round(calculateAccuracy(snapshot.correctKeystrokes, snapshot.totalKeystrokes)),
+    // Floor, not round, so any mistake keeps accuracy below 100%. The tiny
+    // epsilon stops float error (0.57 * 100 = 56.99999...) flooring a whole point.
+    accuracy: Math.floor(calculateAccuracy(snapshot.correctKeystrokes, snapshot.totalKeystrokes) + 1e-9),
     correctChars,
     incorrectChars,
     duration: snapshot.duration,

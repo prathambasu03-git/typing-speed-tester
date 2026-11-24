@@ -50,10 +50,12 @@ const dom = {
   typingArea: document.getElementById('typing-area'),
   track: document.getElementById('words-track'),
   words: document.getElementById('words'),
+  wordsText: document.getElementById('words-text'),
   caret: document.getElementById('caret'),
   input: document.getElementById('hidden-input'),
   restartInline: document.getElementById('restart-inline'),
   results: document.getElementById('results'),
+  resultsTitle: document.getElementById('results-title'),
   resWpm: document.getElementById('res-wpm'),
   resAcc: document.getElementById('res-acc'),
   resRaw: document.getElementById('res-raw'),
@@ -150,7 +152,7 @@ function createInitialState(duration) {
     results: new Array(chars.length).fill(null), // null | 'correct' | 'incorrect'
     duration,                                   // seconds
     timeLeft: duration,                         // seconds (may be fractional)
-    startTime: null,                            // ms timestamp from Date.now()
+    startTime: null,                            // ms timestamp from performance.now()
     intervalId: null,                           // setInterval handle
     totalKeystrokes: 0,                         // every printable key typed
     correctKeystrokes: 0,                       // printable keys that matched
@@ -200,8 +202,14 @@ function renderText() {
   dom.words.replaceChildren();
   spans = [];
   appendCharSpans(state.chars);
+  renderWordsText();
   measureLineHeight();
   renderCaret(null);
+}
+
+/** Screen-reader copy of the text: one string instead of one span per char. */
+function renderWordsText() {
+  dom.wordsText.textContent = state.chars.join('');
 }
 
 /** Updates ONE character span to match state.results[i]. */
@@ -276,8 +284,8 @@ function renderLiveStats(elapsedMs) {
   dom.liveAcc.textContent = state.totalKeystrokes === 0 ? '--' : `${stats.accuracy}%`;
 }
 
-function renderBest() {
-  const best = getBest(state.duration);
+/** `best` is loaded by the caller, so rendering never touches storage. */
+function renderBest(best) {
   dom.liveBest.textContent = best ? String(best.wpm) : '--';
 }
 
@@ -345,13 +353,21 @@ function applyTheme(theme) {
 }
 
 /** Brings the whole screen in line with the current state (used on restart). */
-function renderAll() {
+function renderAll(best) {
   renderPhase();      // must run first: the text must be visible to be measured
   renderSettings();
   renderTimer();
   renderLiveStats(0);
-  renderBest();
+  renderBest(best);
   renderText();
+}
+
+/** Shown instead of the text when words.js failed to load. */
+function renderLoadError() {
+  dom.words.textContent = 'The word list could not be loaded. Please reload the page.';
+  dom.words.removeAttribute('aria-hidden'); // this message must reach screen readers
+  dom.input.disabled = true;
+  dom.restartInline.hidden = true;
 }
 
 /* ---------- 8. Timer ---------- */
@@ -366,9 +382,20 @@ function stopTimer() {
 function startTest() {
   stopTimer(); // guard: never allow two intervals (the "double speed timer" bug)
   state.phase = 'running';
-  state.startTime = Date.now();
+  // performance.now() is monotonic: unlike Date.now() it never jumps when the
+  // system clock changes mid-test.
+  state.startTime = performance.now();
   state.intervalId = setInterval(tick, CONFIG.tickMs);
   renderPhase();
+}
+
+function getElapsedMs() {
+  return performance.now() - state.startTime;
+}
+
+/** True once the clock has run out, even if the next tick has not fired yet. */
+function isTimeUp() {
+  return state.phase === 'running' && getElapsedMs() >= state.duration * 1000;
 }
 
 function tick() {
@@ -376,7 +403,7 @@ function tick() {
 
   // Real elapsed time from the clock. Interval ticks drift and get throttled
   // in background tabs, so they are never counted.
-  const elapsedMs = Date.now() - state.startTime;
+  const elapsedMs = getElapsedMs();
   state.timeLeft = Math.max(0, state.duration - elapsedMs / 1000);
 
   if (state.timeLeft === 0) {
@@ -408,13 +435,15 @@ function finishTest() {
   renderPhase();
   renderResults(stats, saved);
   renderHistory(saved.history);
-  renderBest();
+  renderBest(saved.best);
   announce(
     `Test complete. ${stats.wpm} words per minute, ${stats.accuracy} percent accuracy.` +
     (saved.isNewBest ? ' New personal best!' : '')
   );
 
-  dom.restartBtn.focus();
+  // Focus the heading, not the restart button: a stray Space would otherwise
+  // throw the results away before they have been read.
+  dom.resultsTitle.focus();
 }
 
 function restart(duration = state.duration) {
@@ -422,7 +451,7 @@ function restart(duration = state.duration) {
   state = createInitialState(duration);
   writeStorage(STORAGE_KEYS.duration, duration);
   announce('');
-  renderAll();
+  renderAll(getBest(duration));
   focusInput();
 }
 
@@ -430,6 +459,11 @@ function restart(duration = state.duration) {
 
 function handleCharacter(key) {
   if (state.phase === 'finished') return;
+  // Keys pressed after time ran out (before the next tick) must not count.
+  if (isTimeUp()) {
+    finishTest();
+    return;
+  }
   if (state.phase === 'idle') startTest();
 
   const i = state.index;
@@ -446,6 +480,10 @@ function handleCharacter(key) {
 }
 
 function handleBackspace() {
+  if (isTimeUp()) {
+    finishTest();
+    return;
+  }
   if (state.phase !== 'running' || state.index === 0) return;
 
   const previousIndex = state.index;
@@ -461,10 +499,14 @@ function handleBackspace() {
 function extendTextIfNeeded() {
   if (state.chars.length - state.index > CONFIG.extendThreshold) return;
 
-  const more = [' ', ...generateChars(CONFIG.extendWordCount)];
+  const words = generateChars(CONFIG.extendWordCount);
+  if (words.length === 0) return; // no word list: never append a lone space
+
+  const more = [' ', ...words];
   state.chars.push(...more);
   state.results.push(...new Array(more.length).fill(null));
   appendCharSpans(more);
+  renderWordsText();
 }
 
 /* ---------- 10. Input handling ---------- */
@@ -475,9 +517,9 @@ function isInteractiveTarget(target) {
 }
 
 function handleKeydown(event) {
-  // Tab = restart. Shift+Tab is left alone so keyboard users can still move focus.
-  if (event.key === 'Tab') {
-    if (event.shiftKey) return;
+  // Escape restarts, but only from the typing input. Tab is never captured, so
+  // keyboard users can always move focus (WCAG 2.1.1).
+  if (event.key === 'Escape' && event.target === dom.input) {
     event.preventDefault();
     restart();
     return;
@@ -490,7 +532,21 @@ function handleKeydown(event) {
   // Those are handled by the `input` event in handleMobileInput instead.
   if (event.isComposing || event.key === 'Unidentified' || event.key === 'Process') return;
 
-  // Let Space/Enter activate a focused button instead of typing.
+  // Printable characters have a one-character key. Shift, CapsLock, Alt,
+  // arrows, F1-F12, Escape, Enter... all have longer names.
+  const isPrintable = event.key.length === 1;
+  const inputHasFocus = document.activeElement === dom.input;
+
+  // Mid-test, typed keys (Space included) always go to the test, even if focus
+  // has wandered to a button: otherwise a space would click it and restart.
+  if (state.phase === 'running' && isPrintable && !inputHasFocus) {
+    event.preventDefault();
+    focusInput();
+    handleCharacter(event.key);
+    return;
+  }
+
+  // Outside a test, let Space/Enter activate a focused button instead of typing.
   if (isInteractiveTarget(event.target) && (event.key === ' ' || event.key === 'Enter')) return;
 
   // Space would scroll the page, even after the test finishes.
@@ -504,13 +560,12 @@ function handleKeydown(event) {
     return;
   }
 
-  // Printable characters have a one-character key. Shift, CapsLock, Alt,
-  // arrows, F1-F12, Escape, Enter... all have longer names and are ignored.
-  if (event.key.length !== 1) return;
+  if (!isPrintable) return;
 
   // preventDefault also stops the hidden input receiving the character, so the
   // `input` event never fires for it and the key is never counted twice.
   event.preventDefault();
+  if (!inputHasFocus) focusInput();
   handleCharacter(event.key);
 }
 
@@ -526,6 +581,13 @@ function resetInput() {
 }
 
 function handleMobileInput(event) {
+  // Pasted or dropped text is not typing: it would inflate WPM, and scoring a
+  // long paste one char at a time freezes the page.
+  if (event.inputType === 'insertFromPaste' || event.inputType === 'insertFromDrop') {
+    resetInput();
+    return;
+  }
+
   const value = dom.input.value;
   const deleted =
     (typeof event.inputType === 'string' && event.inputType.startsWith('delete')) ||
@@ -553,6 +615,8 @@ function handleSettingsClick(event) {
   const duration = Number(button.dataset.duration);
   if (!isValidDuration(duration)) return;
   restart(duration);
+  // Must come after restart(), which clears the live region first.
+  announce(`Duration set to ${duration} seconds`);
 }
 
 function toggleTheme() {
@@ -572,25 +636,41 @@ function handleResize() {
 
 /* ---------- 11. Start up ---------- */
 
+function blockDefault(event) {
+  event.preventDefault();
+}
+
 function init() {
   applyTheme(prefs.theme);
 
-  document.addEventListener('keydown', handleKeydown);
-  dom.input.addEventListener('input', handleMobileInput);
-  dom.typingArea.addEventListener('click', focusInput);
-  dom.settings.addEventListener('click', handleSettingsClick); // event delegation
-  dom.restartBtn.addEventListener('click', () => restart());
-  dom.restartInline.addEventListener('click', () => restart());
   dom.themeToggle.addEventListener('click', (event) => {
     toggleTheme();
     // Mouse click (detail > 0): hand focus back to the test so the next Space
     // types instead of toggling again. Keyboard users keep focus on the button.
-    if (event.detail > 0) focusInput();
+    if (event.detail > 0 && !dom.input.disabled) focusInput();
   });
+
+  renderAll(getBest(state.duration));
+  renderHistory(loadHistory());
+
+  // words.js failed to load: say so, and leave typing switched off rather
+  // than run a test with no text.
+  if (state.chars.length === 0) {
+    renderLoadError();
+    return;
+  }
+
+  document.addEventListener('keydown', handleKeydown);
+  dom.input.addEventListener('input', handleMobileInput);
+  // Pasted text is not typing (see handleMobileInput); block it at the source.
+  dom.input.addEventListener('paste', blockDefault);
+  dom.input.addEventListener('drop', blockDefault);
+  dom.typingArea.addEventListener('click', focusInput);
+  dom.settings.addEventListener('click', handleSettingsClick); // event delegation
+  dom.restartBtn.addEventListener('click', () => restart());
+  dom.restartInline.addEventListener('click', () => restart());
   window.addEventListener('resize', handleResize);
 
-  renderAll();
-  renderHistory(loadHistory());
   focusInput();
 
   // Web fonts can change character widths after load; re-measure once ready.

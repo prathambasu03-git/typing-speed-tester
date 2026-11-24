@@ -230,7 +230,6 @@ kbd {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  transition: opacity 0.2s ease;
 }
 
 .settings-label {
@@ -259,16 +258,6 @@ kbd {
   background: var(--accent);
   color: var(--accent-contrast);
   font-weight: 700;
-}
-
-/* While a test runs the settings fade back (still clickable to restart). */
-body[data-phase="running"] .settings {
-  opacity: 0.4;
-}
-
-body[data-phase="running"] .settings:hover,
-body[data-phase="running"] .settings:focus-within {
-  opacity: 1;
 }
 
 .live-stats {
@@ -312,9 +301,19 @@ body[data-phase="running"] .settings:focus-within {
   cursor: text;
 }
 
-/* The hidden input holds focus, so show focus on the whole area instead. */
+/* The hidden input holds focus but is invisible, so the whole area shows the
+   focus ring instead (--focus passes 3:1 against the page in both themes). */
 .typing-area:focus-within {
-  border-color: var(--border);
+  border-color: transparent;
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* A caret without focus would suggest typing works when it does not. The
+   animation is cleared too, because keyframes override a plain opacity. */
+.typing-area:not(:focus-within) .caret {
+  opacity: 0;
+  animation: none;
 }
 
 /* Exactly three lines are visible. The font size is set here so that the
@@ -361,6 +360,8 @@ body[data-phase="running"] .settings:focus-within {
 .char.space.incorrect {
   background: var(--error-bg);
   border-radius: 3px;
+  /* The tint alone is too faint (and lost at a line wrap), so add a solid bar. */
+  box-shadow: inset 0 -3px 0 var(--error);
 }
 
 /* The floating caret. JS moves it with transform: translate(x, y). */
