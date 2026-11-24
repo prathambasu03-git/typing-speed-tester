@@ -23,6 +23,8 @@ const CONFIG = Object.freeze({
   defaultDuration: 30,
   historySize: 10,
   minLiveElapsedMs: 1000,   // stops the live WPM spiking in the first second
+  describedWordCount: 30,   // words in the input's screen-reader description
+  resultAnnounceDelayMs: 100, // lets the focus move settle before the result is spoken
 });
 
 const STORAGE_KEYS = Object.freeze({
@@ -50,9 +52,11 @@ const dom = {
   typingArea: document.getElementById('typing-area'),
   track: document.getElementById('words-track'),
   words: document.getElementById('words'),
+  loadError: document.getElementById('load-error'),
   wordsText: document.getElementById('words-text'),
   caret: document.getElementById('caret'),
   input: document.getElementById('hidden-input'),
+  hint: document.getElementById('typing-hint'),
   restartInline: document.getElementById('restart-inline'),
   results: document.getElementById('results'),
   resultsTitle: document.getElementById('results-title'),
@@ -120,6 +124,13 @@ function loadTheme() {
 
 /** Saves a finished test. Returns whether it beat the best for that duration. */
 function saveResult(record) {
+  // A record that would be filtered out on the next load (e.g. wpm > 1000 from
+  // a scripted insert) is never stored, so the screen and storage agree.
+  if (!isValidRecord(record)) {
+    const best = getBest(record.duration);
+    return { history: loadHistory(), isNewBest: false, previousBest: best, best };
+  }
+
   const history = [record, ...loadHistory()].slice(0, CONFIG.historySize);
   writeStorage(STORAGE_KEYS.history, history);
 
@@ -207,9 +218,19 @@ function renderText() {
   renderCaret(null);
 }
 
-/** Screen-reader copy of the text: one string instead of one span per char. */
+/**
+ * Screen-reader copy of the text: one string instead of one span per char.
+ * Only the next few untyped words, so the description stays short and is not
+ * re-read from the first word every time focus returns to the input.
+ */
 function renderWordsText() {
-  dom.wordsText.textContent = state.chars.join('');
+  dom.wordsText.textContent = state.chars
+    .slice(state.index)
+    .join('')
+    .trimStart() // the caret may sit on a space
+    .split(' ')
+    .slice(0, CONFIG.describedWordCount)
+    .join(' ');
 }
 
 /** Updates ONE character span to match state.results[i]. */
@@ -235,9 +256,12 @@ function renderCaret(previousIndex) {
     spans[previousIndex].classList.remove('current');
   }
   const span = spans[state.index];
-  if (!span) return;
-  span.classList.add('current');
-  positionCaret(span);
+  if (span) {
+    span.classList.add('current');
+    positionCaret(span);
+  }
+  // Every caret move (typing and Backspace) changes what is left to type.
+  renderWordsText();
 }
 
 function positionCaret(span) {
@@ -364,13 +388,26 @@ function renderAll(best) {
 
 /** Shown instead of the text when words.js failed to load. */
 function renderLoadError() {
-  dom.words.textContent = 'The word list could not be loaded. Please reload the page.';
-  dom.words.removeAttribute('aria-hidden'); // this message must reach screen readers
+  dom.words.replaceChildren();
+  dom.words.setAttribute('aria-hidden', 'true');
+  // Unhide before writing, so the alert region is rendered when its text
+  // changes and screen readers announce it. It sits outside the clipped
+  // .words-viewport, so the whole message is always visible.
+  dom.loadError.hidden = false;
+  dom.loadError.textContent = 'The word list could not be loaded. Please reload the page.';
+  dom.hint.hidden = true; // "Start typing" would be wrong here
+  dom.typingArea.setAttribute('aria-label', 'Typing test unavailable');
+  for (const button of dom.settingButtons) button.disabled = true;
   dom.input.disabled = true;
   dom.restartInline.hidden = true;
 }
 
 /* ---------- 8. Timer ---------- */
+
+// Handles for deferred announcements. Kept outside `state` because restart()
+// replaces `state` and must still be able to cancel them.
+let resultAnnounceTimer = 0;
+let restartAnnounceFrame = 0;
 
 function stopTimer() {
   if (state.intervalId !== null) {
@@ -436,23 +473,48 @@ function finishTest() {
   renderResults(stats, saved);
   renderHistory(saved.history);
   renderBest(saved.best);
-  announce(
-    `Test complete. ${stats.wpm} words per minute, ${stats.accuracy} percent accuracy.` +
-    (saved.isNewBest ? ' New personal best!' : '')
-  );
 
   // Focus the heading, not the restart button: a stray Space would otherwise
   // throw the results away before they have been read.
   dom.resultsTitle.focus();
+
+  // Announce after the focus move: some screen readers (NVDA) cut off speech
+  // that started before focus changed.
+  const message =
+    `Test complete. ${stats.wpm} words per minute, ${stats.accuracy} percent accuracy.` +
+    (saved.isNewBest ? ' New personal best!' : '');
+  clearTimeout(resultAnnounceTimer);
+  resultAnnounceTimer = setTimeout(() => {
+    resultAnnounceTimer = 0;
+    if (state.phase === 'finished') announce(message); // not if already restarted
+  }, CONFIG.resultAnnounceDelayMs);
 }
 
-function restart(duration = state.duration) {
+/**
+ * Starts a fresh test. `moveFocus` is false when a keyboard user picks a
+ * duration, so their focus (and the pressed state they hear) stays put.
+ */
+function restart(duration = state.duration, {
+  message = `New test ready, ${duration} seconds.`,
+  moveFocus = true,
+} = {}) {
   stopTimer();
+  clearTimeout(resultAnnounceTimer);
+  resultAnnounceTimer = 0;
   state = createInitialState(duration);
   writeStorage(STORAGE_KEYS.duration, duration);
   announce('');
   renderAll(getBest(duration));
-  focusInput();
+  if (moveFocus) focusInput();
+
+  // Escape restarts with focus already on the input, so no focus event tells
+  // screen-reader users anything happened. Writing on the next frame, after
+  // the clear above, makes the same message twice in a row be read again.
+  cancelAnimationFrame(restartAnnounceFrame);
+  restartAnnounceFrame = requestAnimationFrame(() => {
+    restartAnnounceFrame = 0;
+    announce(message);
+  });
 }
 
 /* ---------- 9. Core typing logic ---------- */
@@ -525,8 +587,11 @@ function handleKeydown(event) {
     return;
   }
 
-  // Shortcuts like Ctrl+R or Cmd+C must keep working and never count as typing.
-  if (event.ctrlKey || event.metaKey) return;
+  // Shortcuts like Ctrl+R, Cmd+C or Alt+F (Windows menus) must keep working and
+  // never count as typing. AltGr is reported as Ctrl+Alt on Windows, but it
+  // types real characters (e.g. @ or € on many layouts), so it is let through.
+  if (event.metaKey ||
+      ((event.ctrlKey || event.altKey) && !event.getModifierState('AltGraph'))) return;
 
   // IME composition / Android soft keyboards report 'Unidentified' or 'Process'.
   // Those are handled by the `input` event in handleMobileInput instead.
@@ -614,9 +679,13 @@ function handleSettingsClick(event) {
 
   const duration = Number(button.dataset.duration);
   if (!isValidDuration(duration)) return;
-  restart(duration);
-  // Must come after restart(), which clears the live region first.
-  announce(`Duration set to ${duration} seconds`);
+  restart(duration, {
+    message: `Duration set to ${duration} seconds. New test ready.`,
+    // Mouse clicks (detail > 0) hand focus to the test. Keyboard users stay on
+    // the button so they hear its pressed state; typing still reaches the test
+    // through the idle redirect in handleKeydown.
+    moveFocus: event.detail > 0,
+  });
 }
 
 function toggleTheme() {

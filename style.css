@@ -173,6 +173,14 @@ kbd {
   margin-bottom: 1rem;
 }
 
+/* The results heading receives focus from script, which does not always
+   trigger :focus-visible, so show the ring on plain :focus as well. */
+#results-title:focus-visible,
+#results-title:focus {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
 /* ==========================================================================
    4. Buttons
    ========================================================================== */
@@ -258,6 +266,17 @@ kbd {
   background: var(--accent);
   color: var(--accent-contrast);
   font-weight: 700;
+}
+
+/* Disabled only when the word list failed to load. Drop the active fill so no
+   button looks selectable; --text-dim still keeps the label at 4.5:1. */
+.setting-btn:disabled,
+.setting-btn:disabled:hover,
+.setting-btn[aria-pressed="true"]:disabled {
+  background: transparent;
+  color: var(--text-dim);
+  font-weight: 400;
+  cursor: not-allowed;
 }
 
 .live-stats {
@@ -413,8 +432,20 @@ body[data-phase="idle"] .caret {
 }
 
 .hint {
+  min-width: 0;             /* lets the hint wrap instead of squeezing the button */
   color: var(--text-dim);
   font-size: 0.9rem;
+}
+
+/* Keep the round restart button round at 360px, however long the hint is. */
+.typing-footer .icon-btn {
+  flex-shrink: 0;
+}
+
+/* --error passes 4.5:1 on --bg in both themes (6.60:1 dark, 5.41:1 light). */
+.load-error {
+  color: var(--error);
+  font-weight: 600;
 }
 
 /* ==========================================================================

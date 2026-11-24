@@ -67,16 +67,18 @@
           <div id="words" class="words" aria-hidden="true"></div>
         </div>
       </div>
-      <!-- The same text as one string, because screen readers cannot follow one span per character. -->
+      <!-- Shown only if words.js fails to load. role="alert" makes screen readers announce it. -->
+      <p id="load-error" class="load-error" role="alert" hidden></p>
+      <!-- The untyped text as one string (the next few words only), because screen readers cannot follow one span per character. -->
       <p id="words-text" class="visually-hidden"></p>
 
       <!-- Mobile only: tapping the text focuses this input so the on-screen keyboard opens. -->
       <input id="hidden-input" class="hidden-input" type="text"
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-             aria-label="Type the words shown" aria-describedby="words-text">
+             aria-label="Type the words shown" aria-describedby="typing-hint words-text">
 
       <div class="typing-footer">
-        <p class="hint">Start typing to begin · <kbd>Esc</kbd> or <kbd>Tab</kbd> then <kbd>Enter</kbd> to restart</p>
+        <p id="typing-hint" class="hint">Start typing to begin · <kbd>Esc</kbd> or <kbd>Tab</kbd> then <kbd>Enter</kbd> to restart</p>
         <button id="restart-inline" class="icon-btn" type="button" aria-label="Restart test with new words">
           <span aria-hidden="true">↻</span>
         </button>
