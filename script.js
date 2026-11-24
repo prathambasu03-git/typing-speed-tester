@@ -19,7 +19,7 @@ const CONFIG = Object.freeze({
   extendWordCount: 25,      // words appended when the user nears the end
   extendThreshold: 40,      // append when fewer than this many chars remain
   tickMs: 100,              // timer refresh rate (display only, never used to measure time)
-  durations: [15, 30, 60],
+  durations: DURATIONS,     // defined in stats.js, the single source of truth
   defaultDuration: 30,
   historySize: 10,
   minLiveElapsedMs: 1000,   // stops the live WPM spiking in the first second
@@ -88,19 +88,7 @@ function writeStorage(key, value) {
   }
 }
 
-function isValidDuration(value) {
-  return CONFIG.durations.includes(value);
-}
-
-function isValidRecord(record) {
-  return (
-    record !== null &&
-    typeof record === 'object' &&
-    Number.isFinite(record.wpm) &&
-    Number.isFinite(record.accuracy) &&
-    isValidDuration(record.duration)
-  );
-}
+// isValidDuration and isValidRecord live in stats.js.
 
 function loadHistory() {
   const history = readStorage(STORAGE_KEYS.history, []);
@@ -147,18 +135,8 @@ function saveResult(record) {
 
 /* ---------- 4. Word generation ---------- */
 
-function randomWords(count) {
-  const words = [];
-  for (let i = 0; i < count; i += 1) {
-    words.push(WORDS[Math.floor(Math.random() * WORDS.length)]);
-  }
-  return words;
-}
-
-/** 50 words -> "the cat ran" -> ['t','h','e',' ','c', ...] */
-function generateChars(wordCount) {
-  return randomWords(wordCount).join(' ').split('');
-}
+// randomWords and generateChars live in stats.js; with no word list passed
+// they fall back to the global WORDS from words.js.
 
 /* ---------- 5. State ---------- */
 
@@ -192,45 +170,10 @@ let spans = [];
 // Pixel height of one text line. A layout measurement, not app state.
 let lineHeight = 0;
 
-/* ---------- 6. Stats (pure functions: data in, numbers out, no DOM) ---------- */
+/* ---------- 6. Stats ---------- */
 
-function toSafeNumber(value) {
-  return Number.isFinite(value) ? value : 0;
-}
-
-function countResults(results, kind) {
-  let count = 0;
-  for (const result of results) {
-    if (result === kind) count += 1;
-  }
-  return count;
-}
-
-/** Words per minute, where one "word" is 5 characters. */
-function calculateWpm(charCount, elapsedMs) {
-  const minutes = elapsedMs / 60000;
-  if (minutes <= 0) return 0;
-  return toSafeNumber(charCount / 5 / minutes);
-}
-
-function calculateAccuracy(correctKeystrokes, totalKeystrokes) {
-  if (totalKeystrokes <= 0) return 0;
-  return toSafeNumber((correctKeystrokes / totalKeystrokes) * 100);
-}
-
-/** Every number the UI shows, derived from a state snapshot and an elapsed time. */
-function computeStats(snapshot, elapsedMs) {
-  const correctChars = countResults(snapshot.results, 'correct');
-  const incorrectChars = countResults(snapshot.results, 'incorrect');
-  return {
-    wpm: Math.round(calculateWpm(correctChars, elapsedMs)),
-    rawWpm: Math.round(calculateWpm(snapshot.totalKeystrokes, elapsedMs)),
-    accuracy: Math.round(calculateAccuracy(snapshot.correctKeystrokes, snapshot.totalKeystrokes)),
-    correctChars,
-    incorrectChars,
-    duration: snapshot.duration,
-  };
-}
+// calculateWpm, calculateAccuracy and computeStats live in stats.js as pure
+// functions, so they can be tested in Node without a DOM.
 
 /* ---------- 7. Rendering (state -> DOM, write only) ---------- */
 
