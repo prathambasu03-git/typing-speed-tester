@@ -27,3 +27,6 @@ const WORDS = Object.freeze([
   'group', 'play', 'stand', 'increase', 'early', 'course', 'change', 'help', 'line', 'city',
   'water', 'light', 'music', 'river', 'paper', 'story', 'learn', 'young', 'night', 'study'
 ]);
+
+/* Node export (ignored in the browser): lets the multiplayer server reuse this list. */
+if (typeof module !== 'undefined' && module.exports) { module.exports = { WORDS }; }

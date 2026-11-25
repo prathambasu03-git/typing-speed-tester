@@ -176,7 +176,9 @@ kbd {
 /* The results heading receives focus from script, which does not always
    trigger :focus-visible, so show the ring on plain :focus as well. */
 #results-title:focus-visible,
-#results-title:focus {
+#results-title:focus,
+#race-title:focus-visible,
+#race-title:focus {
   outline: 3px solid var(--focus);
   outline-offset: 2px;
 }
@@ -217,6 +219,31 @@ kbd {
 
 .primary-btn:hover {
   filter: brightness(1.08);
+}
+
+/* "Waiting for opponent…" after Race again. Colors stay unchanged so the text
+   keeps its contrast; the label itself says why the button does nothing. */
+.primary-btn[aria-disabled="true"],
+.primary-btn[aria-disabled="true"]:hover {
+  cursor: not-allowed;
+  filter: none;
+}
+
+.secondary-btn {
+  display: block;
+  width: 100%;
+  margin-top: 0.75rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font-weight: 700;
+  transition: border-color 0.15s ease;
+}
+
+.secondary-btn:hover {
+  border-color: var(--accent);
 }
 
 /* ==========================================================================
@@ -493,7 +520,91 @@ body[data-phase="idle"] .caret {
 }
 
 /* ==========================================================================
-   8. History
+   8. Multiplayer race panel and results
+   ========================================================================== */
+.race-status {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.race-tracks {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+}
+
+/* Name and meta on the first row, the bar across both columns on the second,
+   so a row never needs more width than a 360px screen gives it. */
+.race-track {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.35rem 1rem;
+  align-items: baseline;
+  padding: 0.5rem 0;
+}
+
+.race-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.race-meta {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Fill vs track (WCAG 1.4.11, 3:1): dark --text 10.67:1, --accent 7.66:1;
+   light --text 11.71:1, --accent 3.85:1. */
+.race-bar {
+  grid-column: 1 / -1;
+  height: 0.5rem;
+  background: var(--border);
+  /* Outlines the empty track, which --border alone barely separates from the card. */
+  box-shadow: inset 0 0 0 1px var(--text-dim);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+/* Width changes use transform (set by JS), so updates never trigger layout. */
+.race-bar-fill {
+  height: 100%;
+  background: var(--text);
+  transform-origin: left;
+  transform: scaleX(0);
+  transition: transform 0.2s linear;
+}
+
+.race-track--self .race-bar-fill {
+  background: var(--accent);
+}
+
+.race-results {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+.race-result {
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.race-result:first-child {
+  border-top: 0;
+}
+
+.race-result--self {
+  font-weight: 700;
+}
+
+/* ==========================================================================
+   9. History
    ========================================================================== */
 .history-list {
   list-style: none;
@@ -525,7 +636,7 @@ body[data-phase="idle"] .caret {
 }
 
 /* ==========================================================================
-   9. Small screens (down to 360px)
+   10. Small screens (down to 360px)
    ========================================================================== */
 @media (max-width: 600px) {
   .toolbar {
@@ -569,11 +680,12 @@ body[data-phase="idle"] .caret {
 }
 
 /* ==========================================================================
-   10. Reduced motion
+   11. Reduced motion
    ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
   .caret,
   .words-track,
+  .race-bar-fill,
   body {
     transition: none;
   }

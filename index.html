@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Typing Speed Tester</title>
   <meta name="description" content="A fast, minimal typing speed test built with vanilla HTML, CSS and JavaScript.">
+  <!-- Multiplayer game server. Read once by script.js; only http(s) URLs are accepted. -->
+  <meta name="typing-server-url" content="http://localhost:3000">
 
   <!-- Apply the saved theme before first paint so the page never flashes the wrong colors. -->
   <script>
@@ -21,6 +23,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="words.js" defer></script>
   <script src="stats.js" defer></script>
+  <script src="multiplayer.js" defer></script>
   <script src="script.js" defer></script>
 </head>
 <body data-phase="idle">
@@ -33,6 +36,12 @@
 
   <main class="container">
     <section class="toolbar" aria-label="Test settings and live stats">
+      <!-- Shown by script.js only when multiplayer is available and its server is reachable from this page. -->
+      <div id="mode" class="settings" role="group" aria-label="Game mode" hidden>
+        <button type="button" class="setting-btn" data-mode="solo" aria-pressed="true">solo</button>
+        <button type="button" class="setting-btn" data-mode="multi" aria-pressed="false">multiplayer</button>
+      </div>
+
       <div id="settings" class="settings" role="group" aria-label="Test duration in seconds">
         <span class="settings-label" aria-hidden="true">time</span>
         <button type="button" class="setting-btn" data-duration="15" aria-pressed="false">15</button>
@@ -53,11 +62,21 @@
           <dt>acc</dt>
           <dd id="live-acc">--</dd>
         </div>
-        <div class="live-stat">
+        <div id="live-best-stat" class="live-stat">
           <dt>best</dt>
           <dd id="live-best">--</dd>
         </div>
       </dl>
+    </section>
+
+    <!-- Multiplayer connection problems. role="alert" makes screen readers announce it. -->
+    <p id="mp-error" class="load-error" role="alert" hidden></p>
+
+    <section id="race-panel" class="race-panel card" aria-labelledby="race-title" hidden>
+      <h2 id="race-title" class="card-title" tabindex="-1">race</h2>
+      <!-- Not a live region: the per-second countdown would be chatty. Key moments go through #announcer. -->
+      <p id="race-status" class="race-status"></p>
+      <ul id="race-tracks" class="race-tracks" aria-label="Live progress"></ul>
     </section>
 
     <section id="typing-area" class="typing-area" aria-label="Typing test. Start typing to begin.">
@@ -79,6 +98,7 @@
 
       <div class="typing-footer">
         <p id="typing-hint" class="hint">Start typing to begin · <kbd>Esc</kbd> or <kbd>Tab</kbd> then <kbd>Enter</kbd> to restart</p>
+        <p id="race-hint" class="hint" hidden>Type the passage. Fix every mistake to finish. To leave, choose Solo. If the keyboard does not open, tap the passage.</p>
         <button id="restart-inline" class="icon-btn" type="button" aria-label="Restart test with new words">
           <span aria-hidden="true">↻</span>
         </button>
@@ -109,8 +129,10 @@
           <dd id="res-time">30s</dd>
         </div>
       </dl>
+      <ol id="race-results" class="race-results" aria-label="Finishing order" hidden></ol>
       <p id="res-best" class="best-badge"></p>
       <button id="restart-btn" class="primary-btn" type="button">Restart test</button>
+      <button id="leave-btn" class="secondary-btn" type="button" hidden>Back to solo</button>
     </section>
 
     <section class="history card" aria-labelledby="history-title">

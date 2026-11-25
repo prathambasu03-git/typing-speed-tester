@@ -1,0 +1,38 @@
+'use strict';
+
+/* Protocol constants (docs/PROTOCOL.md section 2). The timing values are
+   defaults; createServer(options) may override them so tests can use short
+   timers. */
+
+const ERROR_CODES = Object.freeze({
+  BAD_PAYLOAD: 'BAD_PAYLOAD',
+  RATE_LIMITED: 'RATE_LIMITED',
+  ROOM_FULL: 'ROOM_FULL',
+  RACE_IN_PROGRESS: 'RACE_IN_PROGRESS',
+  ALREADY_JOINED: 'ALREADY_JOINED',
+  NOT_IN_ROOM: 'NOT_IN_ROOM',
+  NOT_FINISHED: 'NOT_FINISHED',
+  IDLE_TIMEOUT: 'IDLE_TIMEOUT',
+  INTERNAL: 'INTERNAL',
+});
+
+module.exports = Object.freeze({
+  ROOM_ID: 'main',
+  MAX_PLAYERS: 2,
+  MIN_PLAYERS: 2,
+  COUNTDOWN_MS: 3000,
+  RACE_TIME_LIMIT_MS: 120000,
+  REMATCH_TIMEOUT_MS: 60000,
+  JOIN_TIMEOUT_MS: 10000,
+  PASSAGE_WORD_COUNT: 30,
+  PASSAGE_MAX_LENGTH: 1000,
+  MAX_KEYS_PER_EVENT: 64,
+  BROADCAST_INTERVAL_MS: 200,
+  RATE_LIMIT_CAPACITY: 20,
+  RATE_LIMIT_REFILL_PER_SEC: 10,
+  RATE_LIMIT_ERROR_INTERVAL_MS: 1000,
+  SEQ_MAX: 2147483647,
+  BACKSPACE: '\b',
+  MAX_HTTP_BUFFER_SIZE: 4096,
+  ERROR_CODES,
+});
