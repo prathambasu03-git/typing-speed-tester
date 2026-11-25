@@ -25,6 +25,9 @@ const MP_CONSTANTS = Object.freeze({
   rematchTimeoutMs: 60000,
   // How long before that removal the client warns (WCAG 2.2.1).
   rematchWarningMs: 20000,
+  // The warning fires this much earlier: the server's timer starts before
+  // race:end reaches us, and background tabs can delay timers.
+  rematchWarningMarginMs: 3000,
 });
 
 // Payload limits from PROTOCOL.md section 5. The server caps a room at 8, so

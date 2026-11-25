@@ -34,7 +34,7 @@ if (typeof DURATIONS === 'undefined' || typeof computeStats !== 'function' ||
 
 // multiplayer.js missing only switches multiplayer off; solo never depends on it.
 const MP_AVAILABLE = typeof resolveServerUrl === 'function' && typeof validateRoomState === 'function' &&
-  typeof isServerUsable === 'function';
+  typeof isServerUsable === 'function' && typeof MP_CONSTANTS === 'object';
 
 /* ---------- 1. Configuration ---------- */
 
@@ -1112,15 +1112,18 @@ function isFocusIn(element) {
  * Announces once a focus move has settled (NVDA cuts off speech that started
  * before focus changed). Dropped if `state` was replaced in the meantime, so a
  * stale message is never read. Shares the timer that restart() cancels.
+ * `onSpoken`, if given, runs only when the message is actually written.
  */
-function announceSoon(message) {
+function announceSoon(message, onSpoken) {
   const expected = state;
   cancelResultAnnouncement();
   pendingAnnouncement = message;
   resultAnnounceTimer = setTimeout(() => {
     resultAnnounceTimer = 0;
     pendingAnnouncement = '';
-    if (state === expected) announce(message);
+    if (state !== expected) return;
+    announce(message);
+    if (onSpoken) onSpoken();
   }, CONFIG.resultAnnounceDelayMs);
 }
 
@@ -1291,10 +1294,17 @@ function renderRaceResults() {
   dom.raceResults.replaceChildren(fragment);
 }
 
-const REMATCH_TIMEOUT_SECONDS = Math.round(MP_CONSTANTS.rematchTimeoutMs / 1000);
-const REMATCH_WARNING_SECONDS = Math.round(MP_CONSTANTS.rematchWarningMs / 1000);
-const REMATCH_NOTICE = `Press Race again within ${REMATCH_TIMEOUT_SECONDS} seconds to stay in the room.`;
-const REMATCH_WARNING = `${REMATCH_WARNING_SECONDS} seconds left to press Race again, or you will go back to solo.`;
+// Built on call, not at load: MP_CONSTANTS lives in multiplayer.js, and a
+// load-time read would throw and stop solo if that file failed to load.
+function rematchNotice() {
+  const seconds = Math.round(MP_CONSTANTS.rematchTimeoutMs / 1000);
+  return `Press Race again within ${seconds} seconds to stay in the room.`;
+}
+
+function rematchWarning() {
+  const seconds = Math.round(MP_CONSTANTS.rematchWarningMs / 1000);
+  return `${seconds} seconds left to press Race again, or you will go back to solo.`;
+}
 
 /**
  * The time limit after a race. Shown, not announced with the status, so
@@ -1303,8 +1313,9 @@ const REMATCH_WARNING = `${REMATCH_WARNING_SECONDS} seconds left to press Race a
  */
 function rematchNoticeText() {
   const mp = state.mp;
-  if (state.phase !== 'finished' || mp.rematchRequested) return '';
-  return mp.rematchWarned ? REMATCH_WARNING : REMATCH_NOTICE;
+  // No deadline: the server has no idle timer running for us (see onRoomState).
+  if (state.phase !== 'finished' || mp.rematchRequested || mp.rematchDeadline === null) return '';
+  return mp.rematchWarned ? rematchWarning() : rematchNotice();
 }
 
 /**
@@ -1331,7 +1342,8 @@ function startMultiplayer() {
   mpErrorCode = null;
   mpDisconnectCode = null;
 
-  state = createRaceState({ playerId: null, room: null });
+  // instructionsSpoken: the "fix every mistake" rule was read out this session.
+  state = createRaceState({ playerId: null, room: null, instructionsSpoken: false });
   renderMpError();
   renderAll();
   announce('Connecting to the multiplayer server.');
@@ -1464,8 +1476,11 @@ function onJoinAck(raw) {
   renderTimer();
   renderRacePanel();
   renderRaceTracks();
-  // Delayed, so a race:countdown arriving right behind it replaces this message.
-  announceSoon('Connected. Waiting for an opponent. When the race starts, type the passage and fix every mistake to finish.');
+  // Delayed, so a race:countdown arriving right behind it replaces this
+  // message; the countdown then carries the rule (see onRaceCountdown).
+  const session = state.mp.session;
+  announceSoon('Connected. Waiting for an opponent. When the race starts, type the passage and fix every mistake to finish.',
+    () => { session.instructionsSpoken = true; });
 }
 
 /* 12.4 Server events */
@@ -1491,6 +1506,13 @@ function onRoomState(raw) {
   // end the race here with no results, or the client would stay stuck.
   if (state.phase === 'running' && (room.phase === 'finished' || room.phase === 'waiting')) {
     endRace(null);
+    // A 'waiting' room means the server already cleared its idle timer, so
+    // no removal is coming: no deadline, notice or warning.
+    if (room.phase === 'waiting') {
+      mp.rematchDeadline = null;
+      clearRematchWarnTimer();
+      renderRaceResultsStatus();
+    }
     // Joins endRace's pending "Race over." (see setResultsStatus).
     setResultsStatus(rematchStatus(room));
     return;
@@ -1562,9 +1584,18 @@ function onRaceCountdown(raw) {
   // The player asked for a race and must be able to type at "Go".
   focusInput();
   const seconds = state.mp.countdownSeconds;
-  announceSoon(seconds > 0
-    ? `Race starting in ${seconds} second${seconds === 1 ? '' : 's'}. Get ready to type.`
-    : 'Race starting. Get ready to type.');
+  const start = seconds > 0
+    ? `Race starting in ${seconds} second${seconds === 1 ? '' : 's'}.`
+    : 'Race starting.';
+  // A second joiner's join message was cancelled by this countdown, so the
+  // rule is said here instead, once per session.
+  const session = state.mp.session;
+  if (session.instructionsSpoken) {
+    announceSoon(`${start} Get ready to type.`);
+  } else {
+    session.instructionsSpoken = true;
+    announceSoon(`${start} Fix every mistake to finish.`);
+  }
 }
 
 function onRaceStart(raw) {
@@ -1685,13 +1716,14 @@ function scheduleRematchWarning() {
   const mp = state.mp;
   clearRematchWarnTimer();
   if (mp.rematchWarned || mp.rematchDeadline === null) return;
-  const delay = mp.rematchDeadline - MP_CONSTANTS.rematchWarningMs - performance.now();
+  const delay = mp.rematchDeadline - MP_CONSTANTS.rematchWarningMs -
+    MP_CONSTANTS.rematchWarningMarginMs - performance.now();
   mp.rematchWarnTimerId = setTimeout(() => {
     mp.rematchWarnTimerId = null;
     if (state.mp !== mp || state.phase !== 'finished' || mp.rematchRequested) return;
     mp.rematchWarned = true;
     renderRaceResultsStatus();
-    announce(REMATCH_WARNING);
+    announce(rematchWarning());
   }, Math.max(0, delay));
 }
 
