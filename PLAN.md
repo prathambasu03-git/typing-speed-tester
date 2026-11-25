@@ -237,7 +237,7 @@ Dependencies: `express` (^5), `socket.io` (^4.8). Dev: `socket.io-client`
 ```
 PORT=3000
 # Comma-separated exact origins (no trailing slash, no path)
-CORS_ORIGINS=https://prathambasu03.github.io
+CORS_ORIGINS=https://prathambasu03-git.github.io
 # Allow http://localhost:<any port> and http://127.0.0.1:<any port>
 ALLOW_LOCALHOST=true
 # Allow Origin: null (pages opened from file://). Local development only.
@@ -752,7 +752,7 @@ Pure units (no sockets):
   `'\u007f'`, `'\ud800'` (lone surrogate). `validateJoin`/`validateRematch`
   accept `{}` and `undefined`, reject `null`, `[]`, `'x'`, `1`.
 - `origin.test.js`: GitHub Pages origin allowed;
-  `https://prathambasu03.github.io/` (trailing slash) and
+  `https://prathambasu03-git.github.io/` (trailing slash) and
   `https://evil.github.io` refused; `http://localhost:8080` and
   `http://127.0.0.1` allowed only with `allowLocalhost`;
   `http://localhost.evil.com` refused; `'null'` allowed only with

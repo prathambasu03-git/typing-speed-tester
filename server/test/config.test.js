@@ -11,7 +11,7 @@ test('an empty environment gives the default config without warnings', (t) => {
     { ...config, corsOrigins: [...config.corsOrigins] },
     {
       port: 3000,
-      corsOrigins: ['https://prathambasu03.github.io'],
+      corsOrigins: ['https://prathambasu03-git.github.io'],
       allowLocalhost: true,
       allowNullOrigin: false,
       maxConnectionsPerIp: 10,

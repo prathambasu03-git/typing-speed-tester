@@ -4,7 +4,7 @@ const path = require('node:path');
 
 const DEFAULT_CONFIG = Object.freeze({
   port: 3000,
-  corsOrigins: Object.freeze(['https://prathambasu03.github.io']),
+  corsOrigins: Object.freeze(['https://prathambasu03-git.github.io']),
   allowLocalhost: true,
   allowNullOrigin: false,
   maxConnectionsPerIp: 10,

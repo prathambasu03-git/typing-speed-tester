@@ -1,8 +1,8 @@
 # Typing Speed Tester
 
-A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, plus a real-time two-player race mode (beta) backed by a small Node.js and Socket.io server. The browser app has no frameworks, no build step and no dependencies. It comes with 464 client tests and 189 server tests, all run with Node's built-in test runner.
+A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, plus a real-time two-player race mode (beta) backed by a small Node.js and Socket.io server. The browser app has no frameworks, no build step and no dependencies. It comes with 464 client tests and 190 server tests, all run with Node's built-in test runner.
 
-**Live demo:** [https://prathambasu03.github.io/typing-speed-tester/](https://prathambasu03.github.io/typing-speed-tester/) (solo mode only until the game server is deployed; see [Roadmap](#roadmap))
+**Live demo:** [https://prathambasu03-git.github.io/typing-speed-tester/](https://prathambasu03-git.github.io/typing-speed-tester/) (solo mode only until the game server is deployed; see [Roadmap](#roadmap))
 
 ![Typing test in solo mode, dark theme, showing the word area, live WPM, accuracy and the countdown timer](docs/screenshot.png)
 
@@ -183,7 +183,7 @@ The 464 client tests cover:
 - the multiplayer helpers: server URL checks, keystroke batching, and validators that reject malformed server events
 - loading the scripts in a `node:vm` context with no `document` or `window`, which proves they are DOM-free
 
-The 189 server tests cover payload validation, origin rules, the rate limiter, the race state machine and scoring, timeouts, and full races between two real Socket.io clients: finishing order, time limits, a third player being turned away, disconnects mid-race and client-sent scores being ignored.
+The 190 server tests cover payload validation, origin rules, the rate limiter, the race state machine and scoring, timeouts, and full races between two real Socket.io clients: finishing order, time limits, a third player being turned away, disconnects mid-race and client-sent scores being ignored.
 
 ## Project structure
 
@@ -228,11 +228,11 @@ server/
 1. Create an empty repository on GitHub, named `typing-speed-tester`.
 2. Push this project:
    ```bash
-   git remote add origin https://github.com/prathambasu03/typing-speed-tester.git
+   git remote add origin https://github.com/prathambasu03-git/typing-speed-tester.git
    git push -u origin main
    ```
 3. On GitHub, open **Settings → Pages**. Under **Build and deployment**, choose **Deploy from a branch**, then pick branch `main` and folder `/ (root)`. Click **Save**.
-4. After about a minute the site is live at https://prathambasu03.github.io/typing-speed-tester/.
+4. After about a minute the site is live at https://prathambasu03-git.github.io/typing-speed-tester/.
 
 GitHub Pages serves only the static client. Until the game server is deployed, `<meta name="typing-server-url">` in `index.html` points to `http://localhost:3000`, and the live site hides Multiplayer because a page that is not on localhost cannot use a localhost server.
 

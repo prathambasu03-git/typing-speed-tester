@@ -1,0 +1,160 @@
+warning: in the working copy of 'PLAN.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/PROTOCOL.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/.env.example', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/src/config.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/test/config.test.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/test/http.test.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server/test/origin.test.js', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/PLAN.md b/PLAN.md[m
+[1mindex dd9c66e..ef9d991 100644[m
+[1m--- a/PLAN.md[m
+[1m+++ b/PLAN.md[m
+[36m@@ -237,7 +237,7 @@[m [mDependencies: `express` (^5), `socket.io` (^4.8). Dev: `socket.io-client`[m
+ ```[m
+ PORT=3000[m
+ # Comma-separated exact origins (no trailing slash, no path)[m
+[31m-CORS_ORIGINS=https://prathambasu03.github.io[m
+[32m+[m[32mCORS_ORIGINS=https://prathambasu03-git.github.io[m
+ # Allow http://localhost:<any port> and http://127.0.0.1:<any port>[m
+ ALLOW_LOCALHOST=true[m
+ # Allow Origin: null (pages opened from file://). Local development only.[m
+[36m@@ -752,7 +752,7 @@[m [mPure units (no sockets):[m
+   `'\u007f'`, `'\ud800'` (lone surrogate). `validateJoin`/`validateRematch`[m
+   accept `{}` and `undefined`, reject `null`, `[]`, `'x'`, `1`.[m
+ - `origin.test.js`: GitHub Pages origin allowed;[m
+[31m-  `https://prathambasu03.github.io/` (trailing slash) and[m
+[32m+[m[32m  `https://prathambasu03-git.github.io/` (trailing slash) and[m
+   `https://evil.github.io` refused; `http://localhost:8080` and[m
+   `http://127.0.0.1` allowed only with `allowLocalhost`;[m
+   `http://localhost.evil.com` refused; `'null'` allowed only with[m
+[1mdiff --git a/README.md b/README.md[m
+[1mindex e5ca912..27546e4 100644[m
+[1m--- a/README.md[m
+[1m+++ b/README.md[m
+[36m@@ -1,8 +1,8 @@[m
+ # Typing Speed Tester[m
+ [m
+[31m-A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, plus a real-time two-player race mode (beta) backed by a small Node.js and Socket.io server. The browser app has no frameworks, no build step and no dependencies. It comes with 464 client tests and 189 server tests, all run with Node's built-in test runner.[m
+[32m+[m[32mA keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, plus a real-time two-player race mode (beta) backed by a small Node.js and Socket.io server. The browser app has no frameworks, no build step and no dependencies. It comes with 464 client tests and 190 server tests, all run with Node's built-in test runner.[m
+ [m
+[31m-**Live demo:** [https://prathambasu03.github.io/typing-speed-tester/](https://prathambasu03.github.io/typing-speed-tester/) (solo mode only until the game server is deployed; see [Roadmap](#roadmap))[m
+[32m+[m[32m**Live demo:** [https://prathambasu03-git.github.io/typing-speed-tester/](https://prathambasu03-git.github.io/typing-speed-tester/) (solo mode only until the game server is deployed; see [Roadmap](#roadmap))[m
+ [m
+ ![Typing test in solo mode, dark theme, showing the word area, live WPM, accuracy and the countdown timer](docs/screenshot.png)[m
+ [m
+[36m@@ -183,7 +183,7 @@[m [mThe 464 client tests cover:[m
+ - the multiplayer helpers: server URL checks, keystroke batching, and validators that reject malformed server events[m
+ - loading the scripts in a `node:vm` context with no `document` or `window`, which proves they are DOM-free[m
+ [m
+[31m-The 189 server tests cover payload validation, origin rules, the rate limiter, the race state machine and scoring, timeouts, and full races between two real Socket.io clients: finishing order, time limits, a third player being turned away, disconnects mid-race and client-sent scores being ignored.[m
+[32m+[m[32mThe 190 server tests cover payload validation, origin rules, the rate limiter, the race state machine and scoring, timeouts, and full races between two real Socket.io clients: finishing order, time limits, a third player being turned away, disconnects mid-race and client-sent scores being ignored.[m
+ [m
+ ## Project structure[m
+ [m
+[36m@@ -228,11 +228,11 @@[m [mserver/[m
+ 1. Create an empty repository on GitHub, named `typing-speed-tester`.[m
+ 2. Push this project:[m
+    ```bash[m
+[31m-   git remote add origin https://github.com/prathambasu03/typing-speed-tester.git[m
+[32m+[m[32m   git remote add origin https://github.com/prathambasu03-git/typing-speed-tester.git[m
+    git push -u origin main[m
+    ```[m
+ 3. On GitHub, open **Settings → Pages**. Under **Build and deployment**, choose **Deploy from a branch**, then pick branch `main` and folder `/ (root)`. Click **Save**.[m
+[31m-4. After about a minute the site is live at https://prathambasu03.github.io/typing-speed-tester/.[m
+[32m+[m[32m4. After about a minute the site is live at https://prathambasu03-git.github.io/typing-speed-tester/.[m
+ [m
+ GitHub Pages serves only the static client. Until the game server is deployed, `<meta name="typing-server-url">` in `index.html` points to `http://localhost:3000`, and the live site hides Multiplayer because a page that is not on localhost cannot use a localhost server.[m
+ [m
+[1mdiff --git a/docs/PROTOCOL.md b/docs/PROTOCOL.md[m
+[1mindex e21a4f6..ed5ec47 100644[m
+[1m--- a/docs/PROTOCOL.md[m
+[1m+++ b/docs/PROTOCOL.md[m
+[36m@@ -20,7 +20,7 @@[m [mVersion: **M1** (one room, two players, in-memory state, no persistence).[m
+ - **Origin check.** Both the Socket.io `cors` option and `allowRequest` use one[m
+   function, `isAllowedOrigin(origin, config)`:[m
+   - allowed: every origin listed in `CORS_ORIGINS`, by exact string match[m
+[31m-    (default `https://prathambasu03.github.io`);[m
+[32m+[m[32m    (default `https://prathambasu03-git.github.io`);[m
+   - allowed when `ALLOW_LOCALHOST=true`: `http://localhost[:port]` and[m
+     `http://127.0.0.1[:port]`;[m
+   - allowed when `ALLOW_NULL_ORIGIN=true` (local dev only): the literal origin[m
+[1mdiff --git a/server/.env.example b/server/.env.example[m
+[1mindex 946d4bd..21eba2b 100644[m
+[1m--- a/server/.env.example[m
+[1m+++ b/server/.env.example[m
+[36m@@ -1,6 +1,6 @@[m
+ PORT=3000[m
+ # Comma-separated exact origins (no trailing slash, no path)[m
+[31m-CORS_ORIGINS=https://prathambasu03.github.io[m
+[32m+[m[32mCORS_ORIGINS=https://prathambasu03-git.github.io[m
+ # Allow http://localhost:<any port> and http://127.0.0.1:<any port>[m
+ ALLOW_LOCALHOST=true[m
+ # Allow Origin: null (pages opened from file://). Local development only.[m
+[1mdiff --git a/server/src/config.js b/server/src/config.js[m
+[1mindex b8114a2..5695896 100644[m
+[1m--- a/server/src/config.js[m
+[1m+++ b/server/src/config.js[m
+[36m@@ -4,7 +4,7 @@[m [mconst path = require('node:path');[m
+ [m
+ const DEFAULT_CONFIG = Object.freeze({[m
+   port: 3000,[m
+[31m-  corsOrigins: Object.freeze(['https://prathambasu03.github.io']),[m
+[32m+[m[32m  corsOrigins: Object.freeze(['https://prathambasu03-git.github.io']),[m
+   allowLocalhost: true,[m
+   allowNullOrigin: false,[m
+   maxConnectionsPerIp: 10,[m
+[1mdiff --git a/server/test/config.test.js b/server/test/config.test.js[m
+[1mindex 3cecaf7..9c2c9ee 100644[m
+[1m--- a/server/test/config.test.js[m
+[1m+++ b/server/test/config.test.js[m
+[36m@@ -11,7 +11,7 @@[m [mtest('an empty environment gives the default config without warnings', (t) => {[m
+     { ...config, corsOrigins: [...config.corsOrigins] },[m
+     {[m
+       port: 3000,[m
+[31m-      corsOrigins: ['https://prathambasu03.github.io'],[m
+[32m+[m[32m      corsOrigins: ['https://prathambasu03-git.github.io'],[m
+       allowLocalhost: true,[m
+       allowNullOrigin: false,[m
+       maxConnectionsPerIp: 10,[m
+[1mdiff --git a/server/test/http.test.js b/server/test/http.test.js[m
+[1mindex 1281c4a..64a8e27 100644[m
+[1m--- a/server/test/http.test.js[m
+[1m+++ b/server/test/http.test.js[m
+[36m@@ -7,7 +7,7 @@[m [mconst test = require('node:test');[m
+ const assert = require('node:assert/strict');[m
+ const { setup, sleep } = require('./helpers');[m
+ [m
+[31m-const PAGES = 'https://prathambasu03.github.io';[m
+[32m+[m[32mconst PAGES = 'https://prathambasu03-git.github.io';[m
+ [m
+ /** Resolves 'connected' or 'refused' for a client that was not awaited. */[m
+ function outcome(client) {[m
+[1mdiff --git a/server/test/origin.test.js b/server/test/origin.test.js[m
+[1mindex 7e5e97b..cba47ee 100644[m
+[1m--- a/server/test/origin.test.js[m
+[1m+++ b/server/test/origin.test.js[m
+[36m@@ -3,8 +3,9 @@[m
+ const test = require('node:test');[m
+ const assert = require('node:assert/strict');[m
+ const { isAllowedOrigin } = require('../src/origin');[m
+[32m+[m[32mconst { DEFAULT_CONFIG } = require('../src/config');[m
+ [m
+[31m-const PAGES = 'https://prathambasu03.github.io';[m
+[32m+[m[32mconst PAGES = 'https://prathambasu03-git.github.io';[m
+ const strict = { corsOrigins: [PAGES], allowLocalhost: false, allowNullOrigin: false };[m
+ const local = { corsOrigins: [PAGES], allowLocalhost: true, allowNullOrigin: false };[m
+ const nullOk = { corsOrigins: [PAGES], allowLocalhost: false, allowNullOrigin: true };[m
+[36m@@ -22,7 +23,11 @@[m [mtest('another github.io origin is refused', () => {[m
+ });[m
+ [m
+ test('the http version of the GitHub Pages origin is refused', () => {[m
+[31m-  assert.equal(isAllowedOrigin('http://prathambasu03.github.io', local), false);[m
+[32m+[m[32m  assert.equal(isAllowedOrigin('http://prathambasu03-git.github.io', local), false);[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mtest('the old GitHub Pages origin is refused by the default config', () => {[m
+[32m+[m[32m  assert.equal(isAllowedOrigin('https://prathambasu03.github.io', DEFAULT_CONFIG), false);[m
+ });[m
+ [m
+ test('localhost origins are allowed only when allowLocalhost is true', () => {[m

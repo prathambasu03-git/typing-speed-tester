@@ -20,7 +20,7 @@ Version: **M1** (one room, two players, in-memory state, no persistence).
 - **Origin check.** Both the Socket.io `cors` option and `allowRequest` use one
   function, `isAllowedOrigin(origin, config)`:
   - allowed: every origin listed in `CORS_ORIGINS`, by exact string match
-    (default `https://prathambasu03.github.io`);
+    (default `https://prathambasu03-git.github.io`);
   - allowed when `ALLOW_LOCALHOST=true`: `http://localhost[:port]` and
     `http://127.0.0.1[:port]`;
   - allowed when `ALLOW_NULL_ORIGIN=true` (local dev only): the literal origin

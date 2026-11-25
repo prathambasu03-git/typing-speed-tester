@@ -7,7 +7,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup, sleep } = require('./helpers');
 
-const PAGES = 'https://prathambasu03.github.io';
+const PAGES = 'https://prathambasu03-git.github.io';
 
 /** Resolves 'connected' or 'refused' for a client that was not awaited. */
 function outcome(client) {

@@ -3,8 +3,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { isAllowedOrigin } = require('../src/origin');
+const { DEFAULT_CONFIG } = require('../src/config');
 
-const PAGES = 'https://prathambasu03.github.io';
+const PAGES = 'https://prathambasu03-git.github.io';
 const strict = { corsOrigins: [PAGES], allowLocalhost: false, allowNullOrigin: false };
 const local = { corsOrigins: [PAGES], allowLocalhost: true, allowNullOrigin: false };
 const nullOk = { corsOrigins: [PAGES], allowLocalhost: false, allowNullOrigin: true };
@@ -22,7 +23,11 @@ test('another github.io origin is refused', () => {
 });
 
 test('the http version of the GitHub Pages origin is refused', () => {
-  assert.equal(isAllowedOrigin('http://prathambasu03.github.io', local), false);
+  assert.equal(isAllowedOrigin('http://prathambasu03-git.github.io', local), false);
+});
+
+test('the old GitHub Pages origin is refused by the default config', () => {
+  assert.equal(isAllowedOrigin('https://prathambasu03.github.io', DEFAULT_CONFIG), false);
 });
 
 test('localhost origins are allowed only when allowLocalhost is true', () => {
