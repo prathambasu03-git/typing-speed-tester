@@ -1,5 +1,8 @@
 # PLAN: Multiplayer M1, one room races end to end
 
+> The current milestone is **D: Deploy to Render**, at the end of this file.
+> Sections 1–10 are M1 and stay as built.
+
 ## 1. Goal
 
 Two players open the app, choose **Multiplayer**, and race the same passage in
@@ -930,3 +933,806 @@ and takes precedence over sections 4.3 and 8 above where they differ.
      - a failed join (for example `ROOM_FULL`) is followed by a server
        disconnect;
      - a throwing `pickPassage` still produces a valid `race:countdown`.
+
+---
+
+# D: Deploy to Render
+
+This milestone moves deployment ahead of M2. It takes over these items from
+"M5" in section 9: deployment, the production server URL in the meta tag,
+`docs/DEPLOY.md` and proxy-aware client IPs. Docker, Docker Compose and
+GitHub Actions CI stay for later. Where this section and sections 1–10
+disagree, this section wins.
+
+## D1. Goal
+
+Players on the live GitHub Pages site can race in multiplayer against a game
+server on Render's free tier. A sleeping server shows "Waking up the game
+server, this can take up to a minute" instead of failing after 5 s. Solo keeps
+working everywhere, including from `file://`.
+
+## D2. Assumptions
+
+- **One Render free web service**, Node runtime, in-memory rooms. No Docker,
+  no database, no CI. Rooms are lost when the instance sleeps or redeploys;
+  that is accepted.
+- **No warm-up request.** The client contacts the game server only after the
+  user presses Multiplayer. The Socket.io script request it already makes is
+  what wakes the server. Reasons:
+  - Pinging `/health` on page load would wake the server for every solo
+    visitor. Each wake keeps it up for at least 15 minutes, wasting free
+    instance hours.
+  - It would also send every visitor's IP address to a third-party host
+    without any action from them.
+  - A separate `/health` fetch when Multiplayer is pressed would wake the
+    server no faster than the script request sent at the same moment.
+- **The Render URL is not known yet.** The meta tag gets the placeholder
+  `REPLACE_WITH_RENDER_URL`. The user pastes in the service origin, for
+  example `https://typing-speed-tester-server.onrender.com`.
+- **Local development ignores the meta tag.** On a page served from
+  `localhost` or `127.0.0.1`, the client always uses `http://localhost:3000`.
+  So local work needs no edit, and the deployed URL never has to be removed
+  for testing. Testing the local client against the Render server is not
+  supported (Render sets `ALLOW_LOCALHOST=false` anyway).
+- **`file://` is solo-only, always**, even after the URL is filled in. Render
+  refuses `Origin: null`, so offering Multiplayer there would only fail after
+  the full wake-up wait. `ALLOW_NULL_ORIGIN` stays as a server setting, but
+  the client no longer uses it. This replaces the M1 assumption about
+  `file://` pages and `ALLOW_NULL_ORIGIN`.
+- **Render puts one proxy hop in front of the app.** The client address is the
+  last `X-Forwarded-For` entry (`TRUST_PROXY_HOPS=1`). DEPLOY.md includes a
+  test that checks this without logging any IPs, and explains how to switch to
+  2 if the test fails (D4.3).
+- **Region `oregon`** (Render's default) unless the user chooses another.
+- **Node 22** (current LTS, meets `engines >=20.12`), pinned with
+  `NODE_VERSION`.
+- **No Render `rootDir`.** `server/src/shared.js` requires `../../stats.js`
+  and `../../words.js`, outside `server/`. Render's monorepo docs say a
+  service with a root directory may not be able to use files outside it, so
+  the service builds from the repo root with commands that `cd` into
+  `server/` (D4.4).
+
+## D3. Current state
+
+- `index.html:9`: `<meta name="typing-server-url" content="http://localhost:3000">`. No CSP meta.
+- `multiplayer.js`:
+  - `MP_CONSTANTS` (line 15): `connectTimeoutMs: 5000`.
+  - `resolveServerUrl(value)` (line 59) returns an http(s) origin or `null`.
+  - `isServerUsable(serverUrl, pageHostname)` (line 79) refuses a loopback
+    server on a non-loopback page. `LOOPBACK_HOSTNAMES` is
+    `['localhost', '127.0.0.1']`.
+  - `ERROR_MESSAGES.UNREACHABLE` (line 306).
+- `script.js`:
+  - `CONFIG.serverUrl` (line 57) comes from the meta tag.
+  - `MP_ENABLED` (line 65) is `MP_AVAILABLE && serverUrl !== null && isServerUsable(...)`.
+  - `startMultiplayer()` (line 1336) announces "Connecting to the multiplayer
+    server.".
+  - `loadSocketIo(serverUrl)` (line 1358) makes one attempt with a
+    `connectTimeoutMs` timeout.
+  - `connectSocket(ioFactory)` (line 1408) calls `io(..., { timeout: connectTimeoutMs })`
+    and treats any `connect_error` as `UNREACHABLE`.
+  - `onConnect` (line 1441) runs the join with `socket.timeout(connectTimeoutMs)`.
+  - `raceStatusText()` (line 1163) shows "Connecting to the multiplayer
+    server…" in the `connecting` phase.
+  - `requestRematch()` (line 1810) uses `socket.timeout(connectTimeoutMs)`.
+  - `teardownSocket()` (line 1839) and `leaveMultiplayer(code)` (line 1854).
+- `server/src/app.js:74` (`allowRequest`) and `:87` (engine `connection`)
+  key the per-IP count on `req.socket.remoteAddress` / `rawSocket.remoteAddress`.
+- `server/src/config.js`: `DEFAULT_CONFIG` and `loadConfig(env)` read `PORT`,
+  `CORS_ORIGINS`, `ALLOW_LOCALHOST`, `ALLOW_NULL_ORIGIN` and
+  `MAX_CONNECTIONS_PER_IP`. `server/src/index.js` passes the whole config to
+  `createServer` and handles `SIGTERM`.
+- `server/test/config.test.js` deep-equals the default config.
+- `tests/helpers/load-script.js` fakes `window.location` as
+  `{ hostname, protocol: 'http:' }` (default hostname `'localhost'`) and reads
+  the meta content from `index.html`.
+- `README.md` "Roadmap" (line 239) and the deploy note (line 237) still say
+  "M5: Docker, CI and deployment".
+- No root `package.json`, `.node-version` or `.nvmrc`. `server/package-lock.json`
+  exists, so `npm ci` works.
+
+## D4. Design
+
+### D4.1 Client timings for the cold start
+
+New and changed `MP_CONSTANTS` (`connectTimeoutMs` is **removed**, so no old
+use is left behind):
+
+| Constant | Value | Used for |
+|----------|------:|----------|
+| `wakeTimeoutMs` | `90000` | Budget for the initial connection to a **remote** server (script load plus socket connect, with retries), counted from the Multiplayer press. A cold Render start takes about 50–60 s, so 90 s leaves room for slow wakes. |
+| `localConnectTimeoutMs` | `5000` | The same budget for a **loopback** server. A local server never sleeps, so a stopped one should fail fast. |
+| `wakeRetryDelayMs` | `3000` | Pause before retrying a failed script load or `connect_error` within the budget. During a cold start the platform may answer early with an error page or a 502 instead of holding the request. |
+| `wakeNoticeDelayMs` | `3000` | How long the initial connection may be pending before the waking message shows. Remote servers only. |
+| `joinAckTimeoutMs` | `10000` | `room:join` ack. The server is awake by then, but its first request after a wake can be slow. |
+| `ackTimeoutMs` | `5000` | `race:rematch` ack (unchanged value). |
+| `localServerUrl` | `'http://localhost:3000'` | Server used by loopback pages (D4.2). |
+
+Worst case before falling back to solo: about 90 s (budget) plus 10 s (join
+ack).
+
+New pure helpers in `multiplayer.js`:
+
+- `isLoopbackUrl(url) -> boolean`: `true` when `new URL(url).hostname` is in
+  `LOOPBACK_HOSTNAMES`. Invalid input or a non-string gives `false`.
+- `connectBudgetMs(serverUrl) -> number`: `localConnectTimeoutMs` if
+  `isLoopbackUrl(serverUrl)` or `serverUrl` is not a valid URL, else
+  `wakeTimeoutMs`.
+- `retryDelayWithin(nowMs, deadlineMs, delayMs) -> number | null`: `delayMs`
+  if `nowMs + delayMs < deadlineMs`, else `null` (no time left for another
+  attempt).
+
+New `state.mp` fields, set by `createRaceState`:
+
+- `connectDeadline: null`, a `performance.now()` timestamp;
+- `waking: false`, which is true once the waking message is shown.
+
+New handles outside `state`, next to `mpSocket`:
+
+- `let wakeNoticeTimer = 0;`
+- `let connectRetryTimer = 0;`
+- `let socketIoRetryTimer = 0;` and `let socketIoScript = null;`, used by
+  `loadSocketIo`.
+
+Flow:
+
+1. **`startMultiplayer()`**:
+   - After creating the race state, set
+     `state.mp.connectDeadline = performance.now() + connectBudgetMs(CONFIG.serverUrl)`.
+   - Keep the announcement "Connecting to the multiplayer server.".
+   - If `!isLoopbackUrl(CONFIG.serverUrl)`, set
+     `wakeNoticeTimer = setTimeout(() => showWakeNotice(mp), MP_CONSTANTS.wakeNoticeDelayMs)`,
+     where `mp` is the new `state.mp`.
+   - Call `loadSocketIo(CONFIG.serverUrl, state.mp.connectDeadline)`.
+2. **`loadSocketIo(serverUrl, deadline)`**:
+   - It is still cached in `socketIoPromise` and still resolves at once if
+     `window.io` exists.
+   - Each attempt creates the `<script>`. The attempt's timeout is
+     `Math.max(1000, deadline - performance.now())`.
+   - A failed attempt (`error` event, `load` without `window.io`, or the
+     timeout) removes the script element and checks `window.io` once more.
+     It then calls `retryDelayWithin(performance.now(), deadline, wakeRetryDelayMs)`.
+     For a number, it schedules the next attempt with `socketIoRetryTimer`.
+     For `null`, it resets `socketIoPromise = null` and rejects.
+   - New `cancelSocketIoLoad()` clears `socketIoRetryTimer` and the attempt
+     timeout, removes `socketIoScript`, and resets `socketIoPromise = null`.
+     It only does this if the promise is still pending. A loaded script stays
+     cached. The pending promise rejects, and `handleSocketIoLoadFailure`
+     already ignores it, because the phase or mode no longer matches.
+3. **`connectSocket(ioFactory)`**:
+   - Same guards as now. It calls `io(CONFIG.serverUrl, { transports: ['websocket'], reconnection: false, forceNew: true, timeout: Math.max(1000, state.mp.connectDeadline - performance.now()) })`.
+   - **`onConnectError(socket)`** changes. If the socket is current and the
+     phase is `connecting`:
+     - call `teardownSocket()`;
+     - compute `delay = retryDelayWithin(performance.now(), state.mp.connectDeadline, wakeRetryDelayMs)`;
+     - if `delay` is `null`, call `leaveMultiplayer('UNREACHABLE')`;
+     - otherwise set `connectRetryTimer = setTimeout(() => { if (state.mp === mp) connectSocket(ioFactory); }, delay)`.
+   - This also covers a second Multiplayer press later in the page's life.
+     The script is cached by then, but the server may have gone back to
+     sleep.
+4. **`onConnect`**: the join uses `socket.timeout(MP_CONSTANTS.joinAckTimeoutMs)`.
+   A timeout still means `UNREACHABLE`.
+5. **`requestRematch`**: uses `socket.timeout(MP_CONSTANTS.ackTimeoutMs)`.
+6. **`showWakeNotice(mp)`**:
+   - Do nothing unless `state.mp === mp && state.phase === 'connecting'`.
+   - Otherwise set `mp.waking = true`, call `renderRacePanel()`, and then
+     `announce(WAKE_ANNOUNCEMENT)`.
+7. **`raceStatusText()`**, `connecting` case: show `WAKE_STATUS` when
+   `state.mp.waking`, otherwise "Connecting to the multiplayer server…" as now.
+8. **Clearing the new timers.** Add `clearConnectTimers()`, which clears
+   `wakeNoticeTimer` and `connectRetryTimer`. Call it in three places:
+   - in `onJoinAck` before any state change (success or failure);
+   - in `stopRaceTimers()`, so `leaveMultiplayer` covers it;
+   - at the start of `startMultiplayer()`.
+
+   `leaveMultiplayer` also calls `cancelSocketIoLoad()`.
+
+Texts (these are constants in `script.js`, section 12):
+
+- `WAKE_STATUS = 'Waking up the game server, this can take up to a minute…'`
+  (the status line; it matches the style of "Connecting…").
+- `WAKE_ANNOUNCEMENT = 'Waking up the game server, this can take up to a minute.'`
+- `ERROR_MESSAGES.UNREACHABLE` (in `multiplayer.js`) becomes
+  `'Could not reach the multiplayer server. It may still be starting up, so try again in a minute. You are playing solo.'`
+
+Why the waking message waits 3 s: a warm server connects in well under a
+second. Showing it right away would tell every player the server was asleep
+when it usually is not. If the initial connection is still pending after 3 s,
+the server is almost certainly cold. Loopback servers never show it.
+
+### D4.2 Choosing the server URL
+
+New pure `pickServerUrl(metaContent, pageLocation) -> string | null` in
+`multiplayer.js`, where `pageLocation` is `{ protocol, hostname }`:
+
+1. If `pageLocation` is missing, or `protocol` is not `'http:'` or `'https:'`:
+   return `null`. This makes `file://` solo-only.
+2. If `hostname` is in `LOOPBACK_HOSTNAMES`: return
+   `MP_CONSTANTS.localServerUrl`, whatever the meta says.
+3. Set `url = resolveServerUrl(metaContent)`. Return `null` if any of these
+   holds:
+   - `url` is `null` (this covers the placeholder);
+   - `!isServerUsable(url, hostname)`, which means a loopback server on a
+     public page;
+   - the page is `https:` and `url` starts with `http:` (mixed content would
+     always be blocked).
+4. Otherwise return `url`.
+
+`script.js` changes:
+
+- `CONFIG.serverUrl = MP_AVAILABLE ? pickServerUrl(metaContent, window.location) : null`.
+- `MP_ENABLED = MP_AVAILABLE && CONFIG.serverUrl !== null`. The
+  `isServerUsable` check now lives inside `pickServerUrl`.
+- Add `typeof pickServerUrl === 'function'` to the `MP_AVAILABLE` guard.
+  Keep `resolveServerUrl` and `isServerUsable` exported, since tests use them.
+
+| Page | Meta | Result |
+|------|------|--------|
+| `https://prathambasu03-git.github.io/...` | `REPLACE_WITH_RENDER_URL` | `null`: Multiplayer hidden |
+| same | `https://x.onrender.com` | `https://x.onrender.com` |
+| same | `http://localhost:3000` | `null` |
+| same | `http://x.onrender.com` | `null` (mixed content) |
+| `http://localhost:8080/` | anything | `http://localhost:3000` |
+| `http://127.0.0.1:5500/` | anything | `http://localhost:3000` |
+| `file:///C:/.../index.html` | anything | `null`: solo only |
+
+### D4.3 Proxy-aware client IP (server)
+
+New env var `TRUST_PROXY_HOPS`: an integer from `0` to `10`, default `0`.
+This is a hop count rather than a boolean, so that Render's proxy chain can be
+corrected with a config change and no code change if it turns out to have
+more than one hop.
+
+New pure module `server/src/clientIp.js`:
+
+```js
+/** The address used for the per-IP cap. */
+function getClientIp(remoteAddress, forwardedFor, trustProxyHops) -> string
+```
+
+Rules:
+
+1. Let `peer = normalizeIp(remoteAddress)`, or `'unknown'` if that is not a
+   valid IP.
+2. If `trustProxyHops === 0`, or `forwardedFor` is not a non-empty string:
+   return `peer`. An array never reaches here, because Node joins repeated
+   `X-Forwarded-For` headers into one string with `', '`. Anything that is
+   not a string is treated as absent.
+3. Set `entries = forwardedFor.split(',').map((s) => s.trim())`. Do not drop
+   empty entries.
+4. Pick the hop:
+   - if `entries.length >= trustProxyHops`, use
+     `entries[entries.length - trustProxyHops]`, the address that the
+     outermost trusted proxy saw;
+   - otherwise use `entries[0]` (every entry was added by a trusted proxy).
+5. If `net.isIP(candidate) !== 0`, return `normalizeIp(candidate)`. Otherwise
+   (empty entry, `host:port`, garbage) return `peer`.
+
+`normalizeIp(s)`: trim and lowercase. Strip a leading `::ffff:` when the rest
+is IPv4. Return `null` when `net.isIP` fails.
+
+Why the right-hand entry: each proxy appends the address it received the
+request from. A client can put anything in the header, but only to the
+**left** of what the trusted proxies append. Reading N entries from the right
+cannot be spoofed as long as N is not larger than the real number of proxies.
+The leftmost entry (Express's `trust proxy = true`) can be spoofed, so it is
+not used.
+
+`app.js` changes:
+
+- Add `const trustProxyHops = options.trustProxyHops ?? DEFAULT_CONFIG.trustProxyHops;`.
+- Add a local function
+  `ipOf(req) { return getClientIp(req.socket.remoteAddress, req.headers['x-forwarded-for'], trustProxyHops); }`.
+  Both `allowRequest` (line 74) and the engine `connection` handler (line 87)
+  call it. The handler passes `rawSocket.request`, the same handshake
+  request, so the check and the count always use the same key.
+- Express `trust proxy` is **not** set: no HTTP route reads `req.ip`.
+
+`config.js` changes:
+
+- `DEFAULT_CONFIG.trustProxyHops = 0`.
+- `loadConfig` adds
+  `trustProxyHops: parseIntInRange('TRUST_PROXY_HOPS', env.TRUST_PROXY_HOPS, 0, 10, 0)`.
+
+`server/.env.example`: replace the comment above `MAX_CONNECTIONS_PER_IP` and
+add the new variable after it:
+
+```
+# Concurrent Socket.io connections allowed per client IP (see TRUST_PROXY_HOPS).
+MAX_CONNECTIONS_PER_IP=10
+# Reverse proxies in front of the server that append to X-Forwarded-For.
+# 0 = no proxy: count by the socket's peer address (local development).
+# Render: 1. Never set it higher than the real number of proxies, or clients
+# can fake their address.
+TRUST_PROXY_HOPS=0
+```
+
+**Hop check on Render** (for DEPLOY.md). It is a black-box test and logs no
+IPs. It relies on one fact: the per-IP cap refuses a connection at the
+handshake, which the client reports as "Could not reach the multiplayer
+server…". A "The race room is full" message means the connection **was**
+accepted, because the room check comes after the handshake.
+
+1. In the Render dashboard, temporarily set `MAX_CONNECTIONS_PER_IP=2`. The
+   service restarts.
+2. On one computer, open the live site in three tabs.
+3. Press Multiplayer in tabs 1 and 2. Both join.
+4. Press Multiplayer in tab 3. Expected: "Could not reach…" after the wake
+   budget runs out (up to 90 s). The cap applies to this computer.
+5. Keep tabs 1 and 2 open. On a phone on mobile data (a different IP), open
+   the site and press Multiplayer. Expected: "The race room is full…". The
+   phone's connection was accepted, so it has its own count.
+6. If the phone shows "Could not reach…" instead, every client shares one
+   key. Set `TRUST_PROXY_HOPS=2` and repeat from step 2.
+7. Restore `MAX_CONNECTIONS_PER_IP=10`.
+
+### D4.4 Render configuration
+
+**Recommendation: a `render.yaml` Blueprint at the repo root**, with the same
+settings listed for the dashboard in DEPLOY.md. The file keeps the settings in
+version control and reviewable, and can be applied in one click.
+
+```yaml
+services:
+  - type: web
+    name: typing-speed-tester-server
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: cd server && npm ci --omit=dev
+    startCommand: node server/src/index.js
+    healthCheckPath: /health
+    autoDeploy: true
+    buildFilter:
+      paths:
+        - server/**
+        - stats.js
+        - words.js
+      ignoredPaths:
+        - server/test/**
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: CORS_ORIGINS
+        value: https://prathambasu03-git.github.io
+      - key: ALLOW_LOCALHOST
+        value: "false"
+      - key: ALLOW_NULL_ORIGIN
+        value: "false"
+      - key: TRUST_PROXY_HOPS
+        value: "1"
+      - key: MAX_CONNECTIONS_PER_IP
+        value: "10"
+```
+
+Decisions:
+
+- **No `rootDir`**, because of `shared.js` (D2). The build `cd`s into
+  `server/`. The start command runs from the repo root, so `../../stats.js`
+  resolves. `config.js` finds `.env` through `__dirname`, so the working
+  directory does not matter.
+- **Start with `node` directly, not `npm start`**, so Render's `SIGTERM` on
+  redeploy reaches `index.js`'s shutdown handler with no npm in between.
+- **`NODE_VERSION=22`**:
+  - Render honours this env var first, before `.node-version`, `.nvmrc` or
+    `engines`.
+  - Without a `rootDir`, Render looks for `engines` in a root `package.json`,
+    which does not exist. So `server/package.json`'s `>=20.12` would not be
+    seen.
+  - `>=20.12` is a range and would float to whatever is newest.
+  - An env var avoids adding a root dotfile, which would be an extra infra
+    file.
+- **`PORT` is not set**: Render injects it and `config.js` reads it.
+  `listen(port)` with no host binds all interfaces, which Render needs.
+- **`CORS_ORIGINS` is the origin only**, with no `/typing-speed-tester` path
+  and no trailing slash, because `isAllowedOrigin` matches exactly.
+- **`buildFilter`**: a push that only changes the client or tests does not
+  redeploy the server (and drop live rooms).
+- **WebSockets** work on Render's free tier. The client already uses
+  `transports: ['websocket']`.
+- **Limits to document:**
+  - The service spins down after about 15 minutes without inbound traffic,
+    and the first request then takes about a minute.
+  - Rooms are in memory, so they reset on spin-down, redeploy or restart.
+  - 750 free instance hours per workspace per month. That is enough for one
+    service running all month (744 h at most), but it is shared with any other
+    free services.
+  - The free instance is small (512 MB), which is fine here.
+  - Socket.io's 25 s heartbeat counts as traffic while players are connected.
+
+The user does these by hand (DEPLOY.md lists them in order):
+
+1. Push the repo with `render.yaml` to GitHub.
+2. On Render: **New → Blueprint**, connect the GitHub repo, and apply. Or use
+   **New → Web Service** with the dashboard settings.
+3. Wait for the first deploy, then copy the service URL
+   (`https://<name>.onrender.com`; Render may add a suffix if the name is
+   taken).
+4. Check: `curl https://<name>.onrender.com/health` returns `{"status":"ok"}`.
+   The first call can take about a minute.
+5. Replace `REPLACE_WITH_RENDER_URL` in `index.html` with the origin (no
+   path). Commit, push, and wait for GitHub Pages.
+6. Race test on the live site: open it in two windows (for example a normal
+   and a private window). Press Multiplayer in both and race to the end. Then
+   wait more than 15 minutes, press Multiplayer, and confirm the waking
+   message appears and the connection succeeds.
+7. Run the hop check in D4.3.
+
+Troubleshooting in DEPLOY.md should cover these cases:
+
+| Symptom | Likely cause and fix |
+|---------|----------------------|
+| Waking message, then "Could not reach" on a server that `/health` shows is up | `CORS_ORIGINS` is wrong (the browser console shows the refused handshake). |
+| Multiplayer button missing on the live site | The meta tag still holds the placeholder, or holds an `http:` URL. |
+| Phone refused in the hop check | `TRUST_PROXY_HOPS` is wrong (see D4.3). |
+| Deploy fails with `Cannot find module '../../stats.js'` | A `rootDir` was set. Remove it. |
+
+### D4.5 README roadmap
+
+The docs-writer replaces the "Roadmap" list with:
+
+- **M1:** one room races end to end ✓
+- **Deploy:** the game server on Render's free tier (`render.yaml`,
+  [`docs/DEPLOY.md`](docs/DEPLOY.md)). Mark it ✓ only once the meta tag holds
+  the real URL. Until then write "ready; live once the Render URL is in
+  `index.html`".
+- **M2:** lobby and room codes
+- **M3:** server-side anti-cheat
+- **M4:** saved results and a leaderboard
+- **Later:** Docker Compose and GitHub Actions CI
+
+The docs-writer also makes these changes:
+
+- Update the line 5 live-demo note and the line 237 paragraph. Multiplayer
+  appears on the live site once the meta tag holds the Render URL. The first
+  connection after idle can take about a minute. `file://` is solo-only, and
+  localhost pages always use `http://localhost:3000`.
+- Add a short "Deploy the game server" section that links to `docs/DEPLOY.md`.
+- List `render.yaml` and `docs/DEPLOY.md` in the project tree, and
+  `clientIp.js` under `server/src/`.
+
+## D5. File-by-file changes
+
+### Server changes (backend-builder: `server/`, not `server/test/`)
+
+1. **`server/src/clientIp.js`** (new): `getClientIp` and `normalizeIp` as in
+   D4.3. Use only `node:net`. Export both.
+2. **`server/src/config.js`**: add `trustProxyHops` to `DEFAULT_CONFIG` (`0`)
+   and to `loadConfig` (`TRUST_PROXY_HOPS`, from `0` to `10`).
+3. **`server/src/app.js`**: add the `trustProxyHops` option and use `ipOf(req)`
+   at lines 74 and 87 (D4.3). Add `trustProxyHops` to the options comment
+   (line 53).
+4. **`server/.env.example`**: as in D4.3.
+5. No other server file changes. No new dependencies.
+
+### Server tests (server-tester: `server/test/`)
+
+1. **`config.test.js`**:
+   - The default deep-equal gains `trustProxyHops: 0`.
+   - The "valid values" test adds `TRUST_PROXY_HOPS: '1'` → `1`.
+   - New test: `'true'`, `'-1'`, `'1.5'`, `'11'` and `'abc'` each fall back
+     to `0` with one warning.
+   - `'0'` and `'10'` are accepted.
+   - The existing invalid-values test keeps its count of 4 (leave it
+     unchanged).
+2. **`clientIp.test.js`** (new): the cases in D8.
+3. **`http.test.js`**: add the proxy integration cases in D8.
+
+### Client changes (frontend-builder)
+
+1. **`index.html`** line 9:
+   `<meta name="typing-server-url" content="REPLACE_WITH_RENDER_URL">`.
+   Update the comment on line 8 to: `Multiplayer game server origin, for
+   example https://name.onrender.com. Placeholder = solo only. Localhost
+   pages always use http://localhost:3000.`
+2. **`multiplayer.js`**:
+   - In `MP_CONSTANTS`, remove `connectTimeoutMs` and add `wakeTimeoutMs`,
+     `localConnectTimeoutMs`, `wakeRetryDelayMs`, `wakeNoticeDelayMs`,
+     `joinAckTimeoutMs`, `ackTimeoutMs` and `localServerUrl` (D4.1).
+   - Add `isLoopbackUrl`, `connectBudgetMs`, `retryDelayWithin` and
+     `pickServerUrl`, and export them.
+   - Change the `UNREACHABLE` text (D4.1).
+   - Update the header comment of section 2.
+3. **`script.js`**:
+   - `MP_AVAILABLE` guard, `CONFIG.serverUrl` and `MP_ENABLED` (D4.2).
+   - `createRaceState`: add `connectDeadline: null` and `waking: false`.
+   - New handles and the constants `WAKE_STATUS` and `WAKE_ANNOUNCEMENT`.
+   - New functions `showWakeNotice(mp)`, `clearConnectTimers()` and
+     `cancelSocketIoLoad()`.
+   - Changes to `startMultiplayer`, `loadSocketIo(serverUrl, deadline)`,
+     `connectSocket`, `onConnectError`, `onConnect`, `onJoinAck`,
+     `requestRematch`, `stopRaceTimers`, `leaveMultiplayer` and
+     `raceStatusText`, as in D4.1.
+   - No other behaviour changes.
+   - No `innerHTML`.
+   - No per-keystroke work.
+4. **`style.css`**: no change. The longer status text wraps in
+   `#race-status`; check it at 360px.
+
+### Client tests (qa-tester: `tests/`)
+
+1. **`tests/multiplayer.test.js`**: the new pure functions, the constants and
+   the `UNREACHABLE` text (D8).
+2. **`tests/helpers/load-script.js`**: add a `protocol` option (default
+   `'http:'`) and a `metaContent` override (default: read from `index.html`).
+3. **`tests/script-load.test.js`**: the URL selection cases in D8.
+
+### Infra (devops-deployer)
+
+1. **`render.yaml`** (new, repo root): exactly as in D4.4.
+2. **`docs/DEPLOY.md`** (new). Sections, in order:
+   - what gets deployed and what does not (no Docker or database; rooms are
+     in memory);
+   - Blueprint steps;
+   - the equivalent dashboard settings table: Name, Language Node, Branch
+     `main`, Root Directory *(leave empty)*, Build Command, Start Command,
+     Health Check Path, Instance Type Free, Region, Auto-Deploy and every env
+     var, with `PORT` noted as set by Render;
+   - why Node is pinned with `NODE_VERSION`;
+   - filling in the meta tag and pushing to Pages;
+   - verification (`curl /health`, the two-window race, the cold-start
+     check, the hop check);
+   - free-tier limits;
+   - troubleshooting (D4.4);
+   - redeploys and updating env vars.
+
+   No secrets are involved; say so.
+
+### Docs (docs-writer)
+
+1. **`README.md`**: as in D4.5.
+
+### Build order
+
+1. backend-builder: server steps 1–4. Run `npm test --prefix server` (the
+   existing suite must still pass before the new tests).
+2. server-tester: server tests 1–3.
+3. frontend-builder: client steps 1–3, then `node --check` on the changed
+   files.
+4. Reviews:
+   - backend-reviewer: `clientIp.js`, `app.js` and the `render.yaml`
+     settings;
+   - code-reviewer: the client;
+   - accessibility-auditor: the waking status and announcement.
+5. qa-tester: client tests 1–3.
+6. devops-deployer: `render.yaml` and `docs/DEPLOY.md`.
+7. docs-writer: `README.md`.
+8. Stop before committing (the user's instruction).
+
+## D6. Accessibility
+
+- **Announcements while connecting**, through the existing polite
+  `#announcer`. There are at most two before the result:
+  - "Connecting to the multiplayer server." right away;
+  - the `WAKE_ANNOUNCEMENT`, once, only if the connection is still pending
+    after 3 s on a remote server.
+
+  There are no repeats, no countdown of seconds and no announcement per
+  retry. Success announces "Connected. Waiting for an opponent." as now.
+  Failure is spoken by the `#mp-error` alert with the new `UNREACHABLE` text.
+  The polite message is not repeated.
+- **`#race-status` stays non-live.** The waking text is shown there for
+  sighted users, and the single announcement covers screen readers.
+- **Focus** does not move while connecting or on the waking notice. Keyboard
+  focus stays on the Multiplayer button. Pressing **Solo** cancels at any time
+  (`leaveMultiplayer`), so the long wait is never a trap (WCAG 2.2.1: the
+  user can stop it, and the message says how long it may take).
+- **Contrast and 360px**: the text uses the existing `.race-status` style
+  (`--text`). It is longer, so check that it wraps without horizontal scroll
+  at 360px in both themes.
+
+## D7. Edge cases
+
+Client:
+
+- **Cold server, normal wake (about 50 s):**
+  - "Connecting…", then at 3 s the waking message.
+  - The script request is held or retried until the server answers.
+  - Then the socket connects and joins. The wake timer is cleared at the join
+    ack.
+- **Wake slower than 90 s:** `UNREACHABLE` with "try again in a minute".
+  Pressing Multiplayer again starts a fresh 90 s budget. The server is
+  probably up by then.
+- **Platform returns an error page or 502 during the wake:** the `load`
+  event fires without `window.io`, or the `error` event fires. Either way the
+  client retries after 3 s within the budget.
+- **Script cached, server asleep again** (second press after more than
+  15 minutes idle): the socket `connect_error` is retried within the budget,
+  and the waking message shows the same way.
+- **Solo pressed while waking:**
+  - `leaveMultiplayer` clears `wakeNoticeTimer` and `connectRetryTimer` and
+    calls `cancelSocketIoLoad()`.
+  - The `state.mp === mp` guards stop any late callback.
+  - No alert and no late connection follow.
+- **Multiplayer pressed again right after Solo:** a fresh deadline and a fresh
+  load. The old load was cancelled, so it cannot reject the new session early.
+- **Tab hidden while waking:** deadlines are timestamps, so throttled timers
+  only make retries less frequent. They never extend the budget beyond what
+  `retryDelayWithin` allows.
+- **Local server not running** (localhost page):
+  - The script fails at once and is retried once at 3 s.
+  - That retry fails too, and no time is left for another within the 5 s
+    budget. `UNREACHABLE` arrives at about 3 s and at most 5 s.
+  - The waking message never shows.
+- **Placeholder left on the live site:** Multiplayer is hidden. Solo is
+  unaffected.
+- **`file://` with the URL filled in:** Multiplayer is hidden.
+- **`http:` server URL on the `https:` Pages site:** Multiplayer is hidden
+  (mixed content).
+- **CORS misconfigured:** each `connect_error` is retried until the budget
+  ends, then `UNREACHABLE`. This is a slow failure, but only for a broken
+  deploy, and DEPLOY.md troubleshooting covers it.
+- **Corrupt `localStorage`, paste, IME, fast typing:** unchanged. This
+  milestone does not touch input or storage.
+
+Server:
+
+- **Proxy header spoofing:** a client-supplied `X-Forwarded-For` only adds
+  entries on the left, which are never read when hops is at most the real
+  proxy count.
+- **`TRUST_PROXY_HOPS=0` locally:** the header is ignored completely, so
+  local tests cannot fake their way around the cap.
+- **Bad header values** (empty, `host:port`, a non-IP entry, a very long
+  list): the peer address is used. Work per handshake is linear in the header
+  length, which Node's 16 KB header limit bounds.
+- **IPv4-mapped IPv6** (`::ffff:1.2.3.4`) and case differences are
+  normalised, so one client cannot get two counters.
+- **Players behind one NAT** (a school or office) share one IP and the cap
+  of 10. That is accepted.
+- **Redeploy or spin-down mid-race:** `SIGTERM` → `close()` → clients get
+  `disconnect` → "Lost connection…" and solo.
+- **Two players press Multiplayer on a cold server at once:** both requests
+  wait for the same wake, then both connect.
+- **Late events, simultaneous finishes, cheating attempts:** unchanged from
+  M1.
+
+## D8. Testing notes and acceptance criteria
+
+### `server/test/` (server-tester)
+
+`clientIp.test.js`, `getClientIp(remote, xff, hops)`:
+
+| remote | xff | hops | expected |
+|--------|-----|-----:|----------|
+| `'1.2.3.4'` | `undefined` | 0 | `'1.2.3.4'` |
+| `'10.0.0.1'` | `'203.0.113.5'` | 0 | `'10.0.0.1'` |
+| `'10.0.0.1'` | `'203.0.113.5'` | 1 | `'203.0.113.5'` |
+| `'10.0.0.1'` | `'6.6.6.6, 198.51.100.7, 203.0.113.5'` | 1 | `'203.0.113.5'` |
+| `'10.0.0.1'` | `'198.51.100.7, 203.0.113.5'` | 2 | `'198.51.100.7'` |
+| `'10.0.0.1'` | `'203.0.113.5'` | 3 | `'203.0.113.5'` |
+| `'10.0.0.1'` | `'garbage'` | 1 | `'10.0.0.1'` |
+| `'10.0.0.1'` | `''` | 1 | `'10.0.0.1'` |
+| `'10.0.0.1'` | `'203.0.113.5, '` | 1 | `'10.0.0.1'` |
+| `'10.0.0.1'` | `'203.0.113.5:4711'` | 1 | `'10.0.0.1'` |
+| `'10.0.0.1'` | `'2001:DB8::1'` | 1 | `'2001:db8::1'` |
+| `'::ffff:10.0.0.1'` | `undefined` | 0 | `'10.0.0.1'` |
+| `'10.0.0.1'` | `'::ffff:203.0.113.5'` | 1 | `'203.0.113.5'` |
+| `undefined` | `undefined` | 0 | `'unknown'` |
+| `'10.0.0.1'` | `['203.0.113.5']` | 1 | `'10.0.0.1'` |
+
+`http.test.js` (Node `socket.io-client` with `transports: ['websocket']` and
+`extraHeaders`):
+
+- `createServer({ trustProxyHops: 1, maxConnectionsPerIp: 1 })`:
+  - a client with `x-forwarded-for: 203.0.113.1` connects;
+  - a second with `203.0.113.2` connects;
+  - a third with `203.0.113.1` gets `connect_error`;
+  - after the first disconnects, a new `203.0.113.1` connects (the counter
+    was decremented under the same key).
+- Same server: a client sending `x-forwarded-for: 203.0.113.9, 203.0.113.1`
+  counts as `203.0.113.1`, so it is refused while the first client is still
+  connected.
+- `createServer({ maxConnectionsPerIp: 1 })` (hops default 0): two clients
+  with different `x-forwarded-for` values. The second is refused, because the
+  header is ignored and both come from 127.0.0.1.
+
+### `tests/` (qa-tester)
+
+`multiplayer.test.js`:
+
+`pickServerUrl` (location fields shown as protocol and hostname):
+
+| meta | page | expected |
+|------|------|----------|
+| `'REPLACE_WITH_RENDER_URL'` | `https:`, `prathambasu03-git.github.io` | `null` |
+| `'https://typing-speed-tester-server.onrender.com'` | same | `'https://typing-speed-tester-server.onrender.com'` |
+| `'https://x.onrender.com/path/'` | same | `'https://x.onrender.com'` |
+| `'http://localhost:3000'` | same | `null` |
+| `'http://x.onrender.com'` | same | `null` |
+| `undefined`, `''`, `'javascript:alert(1)'` | same | `null` |
+| `'REPLACE_WITH_RENDER_URL'` | `http:`, `localhost` | `'http://localhost:3000'` |
+| `'https://x.onrender.com'` | `http:`, `127.0.0.1` | `'http://localhost:3000'` |
+| `'https://x.onrender.com'` | `file:`, `''` | `null` |
+| `'https://x.onrender.com'` | `null` / `undefined` | `null` |
+| `'https://x.onrender.com'` | `http:`, `192.168.1.5` | `'https://x.onrender.com'` |
+
+The other helpers:
+
+- `isLoopbackUrl`:
+  - `true` for `'http://localhost:3000'` and `'http://127.0.0.1:3000'`;
+  - `false` for `'https://x.onrender.com'`, `'not a url'`, `null` and `42`.
+- `connectBudgetMs`:
+  - `'http://localhost:3000'` → `5000`;
+  - `'https://x.onrender.com'` → `90000`;
+  - `null` → `5000`.
+- `retryDelayWithin`:
+  - `(0, 90000, 3000)` → `3000`;
+  - `(86999, 90000, 3000)` → `3000`;
+  - `(87000, 90000, 3000)` → `null`;
+  - `(95000, 90000, 3000)` → `null`.
+- `MP_CONSTANTS`:
+  - `wakeTimeoutMs 90000`, `localConnectTimeoutMs 5000`,
+    `wakeRetryDelayMs 3000`, `wakeNoticeDelayMs 3000`,
+    `joinAckTimeoutMs 10000`, `ackTimeoutMs 5000`,
+    `localServerUrl 'http://localhost:3000'`;
+  - it has no `connectTimeoutMs` key;
+  - it is frozen.
+- `errorMessage('UNREACHABLE')` matches `/solo/i` and `/try again/i`.
+
+`script-load.test.js`, which loads the real `index.html`:
+
+- The meta content is either `'REPLACE_WITH_RENDER_URL'` or an `https:`
+  non-loopback URL. This keeps the test valid after the user fills it in.
+- Page `http:`, `localhost` → `CONFIG.serverUrl === 'http://localhost:3000'`,
+  `MP_ENABLED` is true and `#mode` is shown. This existing test must still
+  pass.
+- Page `https:`, `prathambasu03-git.github.io`, with meta content
+  `'REPLACE_WITH_RENDER_URL'` → `MP_ENABLED` is false, `#mode` is hidden and
+  solo `init()` ran.
+- Page `file:`, hostname `''`, meta `'https://x.onrender.com'` →
+  `MP_ENABLED` is false.
+- Same page `https:` with meta `'https://x.onrender.com'` →
+  `CONFIG.serverUrl === 'https://x.onrender.com'`.
+
+### Acceptance criteria
+
+1. `node --test tests/` and `npm test --prefix server` both pass fully.
+2. `index.html` meta content is `REPLACE_WITH_RENDER_URL`. With it, the
+   Multiplayer button is hidden on any non-loopback page and on `file://`.
+   On `http://localhost:<port>` it is shown and connects to
+   `http://localhost:3000`.
+3. Cold remote server:
+   - the status shows "Connecting to the multiplayer server…";
+   - after 3 s (±0.5 s) it shows "Waking up the game server, this can take
+     up to a minute…";
+   - each text is announced exactly once;
+   - the client connects as soon as the server answers within 90 s.
+4. Warm remote server: it connects within 3 s and shows no waking message or
+   announcement.
+5. A remote server that never answers: the `#mp-error` alert shows the new
+   `UNREACHABLE` text when the 90 s budget ends, and the client is back in
+   solo. A stopped local server: the same alert within 5 s, with no waking
+   message.
+6. Pressing Solo while waking: the client is back in solo immediately, with
+   no later alert, connection or announcement.
+7. `race:rematch` still times out at 5 s. Nothing in `script.js` references
+   `connectTimeoutMs`.
+8. Server per-IP cap:
+   - with `TRUST_PROXY_HOPS=0`, `X-Forwarded-For` is ignored;
+   - with `1`, connections are counted by the last entry;
+   - an invalid entry falls back to the peer address;
+   - the default config has `trustProxyHops: 0`;
+   - `.env.example` lists `TRUST_PROXY_HOPS`.
+9. `render.yaml` matches D4.4. `docs/DEPLOY.md` covers every section listed
+   in D5 (Infra), including the manual steps, the dashboard equivalent, the
+   limits and the hop check.
+10. The `README.md` roadmap and deploy notes match D4.5.
+11. Each agent edited only its own files.
+    - No new npm dependencies.
+    - No `innerHTML`.
+    - No third-party requests before the user presses Multiplayer.
+    - No commit.
+
+## D9. Out of scope
+
+- Docker, Docker Compose, GitHub Actions CI (later), Redis and PostgreSQL
+  (M4).
+- A keep-alive pinger or cron to stop spin-down. It would burn instance hours
+  and needs a third-party service.
+- A warm-up request on page load or on hover.
+- Reconnecting after a dropped connection; resuming rooms after a restart.
+- A custom domain for the Render service.
+- Grouping IPv6 clients by /64 for the per-IP cap.
+- Testing a local client against the deployed server.
+- Changing room logic, events or payloads (no protocol event changes).

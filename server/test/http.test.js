@@ -138,3 +138,58 @@ test('connections opened at the same time still respect the per-IP cap', async (
   const results = await Promise.all(clients.map(outcome));
   assert.equal(results.filter((r) => r === 'connected').length, 2, results.join(', '));
 });
+
+/* ---------- Per-IP cap behind a reverse proxy (TRUST_PROXY_HOPS) ---------- */
+
+const PROXY_OPTIONS = Object.freeze({ trustProxyHops: 1, maxConnectionsPerIp: 1 });
+
+function viaProxy(forwardedFor) {
+  return { extraHeaders: { 'x-forwarded-for': forwardedFor } };
+}
+
+/**
+ * Resolves once the server has closed this client's engine socket. The
+ * listener is added after the server's own close handler, so by the time it
+ * runs the per-IP counter has already been decremented.
+ */
+function serverSideClose(ctx, client) {
+  const raw = ctx.server.io.engine.clients[client.socket.io.engine.id];
+  assert.ok(raw, 'server-side engine socket not found');
+  return new Promise((resolve) => raw.once('close', resolve));
+}
+
+test('with one trusted hop, clients with different forwarded addresses each get their own slot', async (t) => {
+  const ctx = await setup(t, PROXY_OPTIONS);
+  assert.equal(await outcome(ctx.rawClient(viaProxy('203.0.113.1'))), 'connected');
+  assert.equal(await outcome(ctx.rawClient(viaProxy('203.0.113.2'))), 'connected');
+});
+
+test('with one trusted hop, a second client with the same forwarded address is refused', async (t) => {
+  const ctx = await setup(t, PROXY_OPTIONS);
+  await ctx.client(viaProxy('203.0.113.1'));
+  await ctx.client(viaProxy('203.0.113.2'));
+  assert.equal(await outcome(ctx.rawClient(viaProxy('203.0.113.1'))), 'refused');
+});
+
+test('with one trusted hop, a forwarded address gets its slot back after its client disconnects', async (t) => {
+  const ctx = await setup(t, PROXY_OPTIONS);
+  const first = await ctx.client(viaProxy('203.0.113.1'));
+  await ctx.client(viaProxy('203.0.113.2'));
+  assert.equal(await outcome(ctx.rawClient(viaProxy('203.0.113.1'))), 'refused');
+  const closed = serverSideClose(ctx, first);
+  await first.close();
+  await closed;
+  assert.equal(await outcome(ctx.rawClient(viaProxy('203.0.113.1'))), 'connected');
+});
+
+test('with one trusted hop, a client-written entry left of the proxy entry does not dodge the cap', async (t) => {
+  const ctx = await setup(t, PROXY_OPTIONS);
+  await ctx.client(viaProxy('203.0.113.1'));
+  assert.equal(await outcome(ctx.rawClient(viaProxy('203.0.113.9, 203.0.113.1'))), 'refused');
+});
+
+test('with no trusted hops, a different forwarded address does not dodge the cap', async (t) => {
+  const ctx = await setup(t, { maxConnectionsPerIp: 1 });
+  await ctx.client(viaProxy('203.0.113.1'));
+  assert.equal(await outcome(ctx.rawClient(viaProxy('203.0.113.2'))), 'refused');
+});

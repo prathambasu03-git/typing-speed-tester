@@ -15,7 +15,25 @@
 const MP_CONSTANTS = Object.freeze({
   progressIntervalMs: 150,
   maxKeysPerEvent: 64,
-  connectTimeoutMs: 5000,
+  // Budget for the first connection to a remote server (script load plus
+  // socket connect, with retries), from the Multiplayer press. A free-tier
+  // host can take about a minute to wake from sleep.
+  wakeTimeoutMs: 90000,
+  // The same budget for a loopback server: it never sleeps, so a stopped one
+  // should fail fast.
+  localConnectTimeoutMs: 5000,
+  // Pause before retrying a failed attempt. While waking, the host may answer
+  // early with an error page instead of holding the request.
+  wakeRetryDelayMs: 3000,
+  // A warm server connects well within this, so the waking message only
+  // shows when the server is almost certainly asleep.
+  wakeNoticeDelayMs: 3000,
+  // room:join ack: the first request after a wake can be slow.
+  joinAckTimeoutMs: 10000,
+  // race:rematch ack.
+  ackTimeoutMs: 5000,
+  // Server used by loopback pages, whatever the meta tag says.
+  localServerUrl: 'http://localhost:3000',
   passageMaxLength: 1000,
   seqMax: 2147483647,
   backspace: '\b',
@@ -50,7 +68,11 @@ const END_REASONS = Object.freeze(['all_finished', 'time_limit']);
 // allowed control character), and the passage never contains any of them.
 const PASSAGE_CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/;
 
-/* ---------- 2. Server URL and key buffering ---------- */
+/* ---------- 2. Server URL, connection timing and key buffering ---------- */
+
+// Which server a page uses (pickServerUrl), how long the first connection may
+// take (connectBudgetMs: long for a remote server that may be asleep, short
+// for a local one) and whether another attempt still fits (retryDelayWithin).
 
 /**
  * The game server origin from the page's meta tag, or null. Only http(s) is
@@ -86,6 +108,53 @@ function isServerUsable(serverUrl, pageHostname) {
   }
   if (!LOOPBACK_HOSTNAMES.includes(hostname)) return true;
   return LOOPBACK_HOSTNAMES.includes(pageHostname);
+}
+
+/** True when `url` is a valid URL whose hostname means "this machine". */
+function isLoopbackUrl(url) {
+  if (typeof url !== 'string') return false;
+  try {
+    return LOOPBACK_HOSTNAMES.includes(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Time allowed for the first connection, in ms. Anything that is not a valid
+ * remote URL gets the short local budget, so a bad value never waits 90 s.
+ */
+function connectBudgetMs(serverUrl) {
+  if (typeof serverUrl !== 'string' || isLoopbackUrl(serverUrl)) return MP_CONSTANTS.localConnectTimeoutMs;
+  try {
+    new URL(serverUrl); // throws for an invalid URL
+  } catch {
+    return MP_CONSTANTS.localConnectTimeoutMs;
+  }
+  return MP_CONSTANTS.wakeTimeoutMs;
+}
+
+/** `delayMs` if another attempt can start before the deadline, else null. */
+function retryDelayWithin(nowMs, deadlineMs, delayMs) {
+  return nowMs + delayMs < deadlineMs ? delayMs : null;
+}
+
+/**
+ * The game server for a page at `pageLocation` ({ protocol, hostname }), or
+ * null for solo only.
+ * - file:// (or anything not http(s)) is solo only: hosts refuse Origin null.
+ * - Loopback pages always use the local server, so local work needs no edit.
+ * - Otherwise the meta URL, unless it is missing (or the placeholder), a
+ *   loopback server, or http: on an https: page (mixed content is blocked).
+ */
+function pickServerUrl(metaContent, pageLocation) {
+  if (!pageLocation || (pageLocation.protocol !== 'http:' && pageLocation.protocol !== 'https:')) return null;
+  const hostname = pageLocation.hostname;
+  if (LOOPBACK_HOSTNAMES.includes(hostname)) return MP_CONSTANTS.localServerUrl;
+  const url = resolveServerUrl(metaContent);
+  if (url === null || !isServerUsable(url, hostname)) return null;
+  if (pageLocation.protocol === 'https:' && url.startsWith('http:')) return null;
+  return url;
 }
 
 /**
@@ -303,7 +372,7 @@ const ERROR_MESSAGES = Object.freeze({
   ROOM_FULL: 'The race room is full. Try again in a minute.',
   RACE_IN_PROGRESS: 'A race is already running. Try again in a minute.',
   RATE_LIMITED: 'Too many requests. Wait a moment and try again.',
-  UNREACHABLE: 'Could not reach the multiplayer server. You are playing solo.',
+  UNREACHABLE: 'Could not reach the multiplayer server. It may still be starting up, so try again in a minute. You are playing solo.',
   DISCONNECTED: 'Lost connection to the multiplayer server. You are playing solo.',
   IDLE_TIMEOUT: 'You were idle, so you left the race room. You are playing solo.',
 });
@@ -327,6 +396,10 @@ if (typeof module !== 'undefined' && module.exports) {
     MP_CONSTANTS,
     resolveServerUrl,
     isServerUsable,
+    isLoopbackUrl,
+    connectBudgetMs,
+    retryDelayWithin,
+    pickServerUrl,
     appendKey,
     isSendableKey,
     validateRoomState,

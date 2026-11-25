@@ -4,7 +4,10 @@ This file is the single source of truth for every Socket.io event between the
 client (project root) and the game server (`server/`). Both builders implement
 it exactly. If code and this file disagree, the code is wrong.
 
-Version: **M1** (one room, two players, in-memory state, no persistence).
+Version: **M1 + D** (one room, two players, in-memory state, no persistence).
+D (Deploy to Render) changes no events or payloads. It adds the client's
+cold-start connection timings (sections 1 and 2) and proxy-aware per-IP
+counting (section 1).
 
 ---
 
@@ -12,9 +15,31 @@ Version: **M1** (one room, two players, in-memory state, no persistence).
 
 - Socket.io v4, default path `/socket.io`. The client script is served by the
   game server at `<server-url>/socket.io/socket.io.js`.
-- The client connects with `io(serverUrl, { transports: ['websocket'],
-  reconnection: false, timeout: 5000 })`. No reconnection in M1: a lost
-  connection ends the multiplayer session and the client falls back to solo.
+- **Connecting.** The client connects with `io(serverUrl, { transports: ['websocket'],
+  reconnection: false, forceNew: true, timeout })`, where `timeout` is the time
+  left in the initial-connection budget (at least 1000 ms). There is no
+  Socket.io reconnection. Once a session has connected, a lost connection ends
+  it and the client falls back to solo.
+- **Initial connection and cold start.** A free Render instance sleeps when
+  idle and can take about a minute to answer its first request.
+  - The initial connection has one budget, counted from the moment the user
+    presses Multiplayer. It covers loading `socket.io.js`, then the socket
+    connect.
+  - The budget is `WAKE_TIMEOUT_MS` for a remote server and
+    `LOCAL_CONNECT_TIMEOUT_MS` for a loopback one.
+  - Within the budget, the client retries a failed script load (an `error`
+    event, a load that does not define `io`, or the attempt timing out) or a
+    `connect_error`. It waits `WAKE_RETRY_DELAY_MS` before each retry, as
+    long as the retry can start before the budget ends.
+  - When the budget runs out, the client falls back to solo with
+    `UNREACHABLE`.
+  - The client sends no request to the server before the user presses
+    Multiplayer. There is no warm-up on page load.
+- **Ack timeouts.** After connecting, the `room:join` ack must arrive within
+  `JOIN_ACK_TIMEOUT_MS`; otherwise the client treats it as `UNREACHABLE`. The
+  `race:rematch` ack must arrive within `ACK_TIMEOUT_MS`; otherwise the
+  rematch has failed, the client shows its generic message, and the button
+  can be used again.
 - `maxHttpBufferSize` on the server is **4096 bytes**. Larger packets are
   dropped by Socket.io and the connection is closed.
 - **Origin check.** Both the Socket.io `cors` option and `allowRequest` use one
@@ -24,12 +49,30 @@ Version: **M1** (one room, two players, in-memory state, no persistence).
   - allowed when `ALLOW_LOCALHOST=true`: `http://localhost[:port]` and
     `http://127.0.0.1[:port]`;
   - allowed when `ALLOW_NULL_ORIGIN=true` (local dev only): the literal origin
-    `null`, which a page opened from `file://` sends;
+    `null`, which a page opened from `file://` sends. The browser client no
+    longer offers Multiplayer from `file://` (D), so only non-browser tools
+    use this;
   - allowed: a missing `Origin` header (non-browser clients such as the tests).
     CORS protects browsers; it cannot stop a script that fakes headers;
   - anything else is refused. The client gets `connect_error`.
 - **Concurrent connections per IP:** at most `MAX_CONNECTIONS_PER_IP` (default
-  10). Extra connections are refused in `allowRequest`.
+  10), counted at the engine level. Extra connections are refused in
+  `allowRequest`.
+  - The client address is
+    `getClientIp(req.socket.remoteAddress, req.headers['x-forwarded-for'], TRUST_PROXY_HOPS)`
+    (`server/src/clientIp.js`).
+  - With `TRUST_PROXY_HOPS=0` (the default), it is the socket's peer address
+    and `X-Forwarded-For` is ignored.
+  - With N > 0, it is the Nth entry from the right of `X-Forwarded-For`: the
+    address that the outermost trusted proxy saw. If the header has fewer than
+    N entries, the leftmost entry is used.
+  - If the header is absent or the chosen entry is not a valid IP address, the
+    peer address is used.
+  - IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are reduced to IPv4, and
+    addresses are lowercased.
+  - On Render, `TRUST_PROXY_HOPS=1`.
+  - The same handshake request keys both the check and the count, so they
+    always match.
 - **Join timeout:** a connected socket that has not joined successfully within
   `JOIN_TIMEOUT_MS` is disconnected by the server, with no event first. The
   timer starts on connection and is cleared on a successful `room:join` and on
@@ -62,14 +105,21 @@ position or "finished" flag.
 | `RATE_LIMIT_REFILL_PER_SEC` | `10` | server | Tokens added per second. |
 | `RATE_LIMIT_ERROR_INTERVAL_MS` | `1000` | server | At most one `game:error` RATE_LIMITED per socket per interval. |
 | `SEQ_MAX` | `2147483647` | both | Largest allowed `seq`. |
-| `CONNECT_TIMEOUT_MS` | `5000` | client | Script load and connect timeout before falling back to solo. |
+| `WAKE_TIMEOUT_MS` | `90000` | client | Initial-connection budget (script load plus socket connect, with retries) for a remote server. Covers a cold start. |
+| `LOCAL_CONNECT_TIMEOUT_MS` | `5000` | client | The same budget for a loopback server (`localhost`, `127.0.0.1`). |
+| `WAKE_RETRY_DELAY_MS` | `3000` | client | Pause before retrying a failed script load or `connect_error` within the budget. |
+| `WAKE_NOTICE_DELAY_MS` | `3000` | client | Pending time before the "Waking up the game server" message (remote servers only). Display only. |
+| `JOIN_ACK_TIMEOUT_MS` | `10000` | client | Time the client waits for the `room:join` ack. |
+| `ACK_TIMEOUT_MS` | `5000` | client | Time the client waits for the `race:rematch` ack. |
 | `BACKSPACE` | `'\b'` (U+0008) | both | Encodes one Backspace inside `keys`. |
 
 The server reads the timing constants from `server/src/constants.js`;
 `createServer(options)` may override them (tests use short timers), including
 `rematchTimeoutMs` and `joinTimeoutMs`. The client keeps its own copy of the
-client-owned values in `multiplayer.js` (`MP_CONSTANTS`) and takes everything
-else from server payloads.
+client-owned values in `multiplayer.js` (`MP_CONSTANTS`, in camelCase:
+`wakeTimeoutMs`, `localConnectTimeoutMs`, `wakeRetryDelayMs`,
+`wakeNoticeDelayMs`, `joinAckTimeoutMs`, `ackTimeoutMs`, …) and takes
+everything else from server payloads.
 
 ---
 
@@ -130,6 +180,10 @@ Each is cleared on every transition out of its phase (the rematch timer on
 every exit from `finished`, to `countdown` or `waiting`) and when the room is
 deleted. Per socket, one join timer (section 1).
 
+**Server restarts:** rooms live in memory. A restart, redeploy or Render
+spin-down drops every room. Connected clients get `disconnect` and fall back
+to solo with `DISCONNECTED`.
+
 ---
 
 ## 4. Client → server events
@@ -149,7 +203,7 @@ General rules for every client event:
 | | |
 |---|---|
 | Direction | client → server |
-| When | Right after the socket connects, once per connection, within `JOIN_TIMEOUT_MS`. |
+| When | Right after the socket connects, once per connection, within `JOIN_TIMEOUT_MS`. The client waits up to `JOIN_ACK_TIMEOUT_MS` for the ack. |
 | Payload | `{}` (an empty object). `undefined` is also accepted. Any other type (string, number, array, `null`) is `BAD_PAYLOAD`. |
 | Ack | **Required.** If no ack function is passed, the server emits `game:error` `BAD_PAYLOAD` and ignores the event. |
 | Success ack | `{ ok: true, playerId: string, room: RoomSnapshot }` |
@@ -242,7 +296,7 @@ Error codes (`game:error`):
 | | |
 |---|---|
 | Direction | client → server |
-| When | The player presses "Race again" on the results card, within `REMATCH_TIMEOUT_MS` of `race:end` (otherwise the server disconnects the player with `IDLE_TIMEOUT`). |
+| When | The player presses "Race again" on the results card, within `REMATCH_TIMEOUT_MS` of `race:end` (otherwise the server disconnects the player with `IDLE_TIMEOUT`). The client waits up to `ACK_TIMEOUT_MS` for the ack. |
 | Payload | `{}` or `undefined`. |
 | Ack | **Required** (same rule as `room:join`). |
 | Success ack | `{ ok: true, room: RoomSnapshot }`. Idempotent: a second call while already ready also returns `ok: true`. |
@@ -450,9 +504,17 @@ clamping rules apply to `race:update`, `player:finish` and `race:end`.
 | `IDLE_TIMEOUT` | server-initiated (`game:error`) | The player did not press "Race again" within `REMATCH_TIMEOUT_MS` of the race ending. Sent just before the server disconnects the socket. |
 | `INTERNAL` | all | Unexpected server error (handler threw). Logged on the server. |
 
-The client also uses two codes of its own, never sent by the server:
-`UNREACHABLE` (script load or connection failed) and `DISCONNECTED`
-(connection lost). They only select a message in `errorMessage(code)`.
+The client also uses two codes of its own, which the server never sends. They
+only select a message in `errorMessage(code)`:
+
+- `UNREACHABLE`: the script load and socket connect did not succeed within
+  the initial-connection budget, including retries (section 1), or the
+  `room:join` ack timed out.
+- `DISCONNECTED`: the connection was lost after joining.
+
+A connection refused for its origin or by the per-IP cap also ends as
+`UNREACHABLE` once the budget runs out. The client cannot tell these refusals
+apart from a sleeping server.
 
 ---
 

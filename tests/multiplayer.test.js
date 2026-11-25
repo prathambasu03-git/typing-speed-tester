@@ -21,6 +21,10 @@ const {
   MP_CONSTANTS,
   resolveServerUrl,
   isServerUsable,
+  isLoopbackUrl,
+  connectBudgetMs,
+  retryDelayWithin,
+  pickServerUrl,
   appendKey,
   isSendableKey,
   validateRoomState,
@@ -158,6 +162,22 @@ describe('MP_CONSTANTS', () => {
   it('has no defaultServerUrl', () => {
     assert.equal(Object.prototype.hasOwnProperty.call(MP_CONSTANTS, 'defaultServerUrl'), false);
   });
+  it('has no connectTimeoutMs, which milestone D removed', () => {
+    assert.equal(Object.prototype.hasOwnProperty.call(MP_CONSTANTS, 'connectTimeoutMs'), false);
+  });
+  it('sets wakeTimeoutMs to 90000', () => assert.equal(MP_CONSTANTS.wakeTimeoutMs, 90000));
+  it('sets localConnectTimeoutMs to 5000', () => assert.equal(MP_CONSTANTS.localConnectTimeoutMs, 5000));
+  it('sets wakeRetryDelayMs to 3000', () => assert.equal(MP_CONSTANTS.wakeRetryDelayMs, 3000));
+  it('sets wakeNoticeDelayMs to 3000', () => assert.equal(MP_CONSTANTS.wakeNoticeDelayMs, 3000));
+  it('sets joinAckTimeoutMs to 10000', () => assert.equal(MP_CONSTANTS.joinAckTimeoutMs, 10000));
+  it('sets ackTimeoutMs to 5000', () => assert.equal(MP_CONSTANTS.ackTimeoutMs, 5000));
+  it("sets localServerUrl to 'http://localhost:3000'", () => {
+    assert.equal(MP_CONSTANTS.localServerUrl, 'http://localhost:3000');
+  });
+  it('cannot have its wake timeout changed at runtime', () => {
+    assert.throws(() => { MP_CONSTANTS.wakeTimeoutMs = 1; }, TypeError);
+    assert.equal(MP_CONSTANTS.wakeTimeoutMs, 90000);
+  });
   it('cannot be changed at runtime', () => {
     assert.throws(() => { MP_CONSTANTS.maxKeysPerEvent = 1000; }, TypeError);
     assert.equal(MP_CONSTANTS.maxKeysPerEvent, 64);
@@ -214,6 +234,71 @@ describe('isServerUsable', () => {
   for (const value of [undefined, null, 42, {}]) {
     it(`rejects a non-string server URL (${label(value)})`, () => {
       assert.equal(isServerUsable(value, 'localhost'), false);
+    });
+  }
+});
+
+describe('pickServerUrl', () => {
+  const pages = {
+    pages: { protocol: 'https:', hostname: 'prathambasu03-git.github.io' },
+    localhost: { protocol: 'http:', hostname: 'localhost' },
+    loopbackIp: { protocol: 'http:', hostname: '127.0.0.1' },
+    file: { protocol: 'file:', hostname: '' },
+    lan: { protocol: 'http:', hostname: '192.168.1.5' },
+  };
+  const rows = [
+    ['REPLACE_WITH_RENDER_URL', 'pages', null],
+    ['https://typing-speed-tester-server.onrender.com', 'pages', 'https://typing-speed-tester-server.onrender.com'],
+    ['https://x.onrender.com/path/', 'pages', 'https://x.onrender.com'],
+    ['http://localhost:3000', 'pages', null],
+    ['http://x.onrender.com', 'pages', null],
+    [undefined, 'pages', null],
+    ['', 'pages', null],
+    ['javascript:alert(1)', 'pages', null],
+    ['REPLACE_WITH_RENDER_URL', 'localhost', 'http://localhost:3000'],
+    ['https://x.onrender.com', 'loopbackIp', 'http://localhost:3000'],
+    ['https://x.onrender.com', 'file', null],
+    ['https://x.onrender.com', 'lan', 'https://x.onrender.com'],
+  ];
+  for (const [meta, page, expected] of rows) {
+    const p = pages[page];
+    it(`returns ${label(expected)} for meta ${label(meta)} on a ${p.protocol}//${p.hostname || '(no host)'} page`, () => {
+      assert.equal(pickServerUrl(meta, { ...p }), expected);
+    });
+  }
+  for (const loc of [null, undefined]) {
+    it(`returns null when the page location is ${label(loc)}`, () => {
+      assert.equal(pickServerUrl('https://x.onrender.com', loc), null);
+    });
+  }
+});
+
+describe('isLoopbackUrl', () => {
+  for (const url of ['http://localhost:3000', 'http://127.0.0.1:3000']) {
+    it(`is true for ${label(url)}`, () => assert.equal(isLoopbackUrl(url), true));
+  }
+  for (const url of ['https://x.onrender.com', 'not a url', null, 42]) {
+    it(`is false for ${label(url)}`, () => assert.equal(isLoopbackUrl(url), false));
+  }
+});
+
+describe('connectBudgetMs', () => {
+  it("gives 5000 ms to 'http://localhost:3000'", () => assert.equal(connectBudgetMs('http://localhost:3000'), 5000));
+  it("gives 90000 ms to 'https://x.onrender.com'", () => assert.equal(connectBudgetMs('https://x.onrender.com'), 90000));
+  it('gives 5000 ms to null', () => assert.equal(connectBudgetMs(null), 5000));
+  it('gives 5000 ms to an invalid URL', () => assert.equal(connectBudgetMs('not a url'), 5000));
+});
+
+describe('retryDelayWithin', () => {
+  const rows = [
+    [0, 90000, 3000, 3000],
+    [86999, 90000, 3000, 3000],
+    [87000, 90000, 3000, null],
+    [95000, 90000, 3000, null],
+  ];
+  for (const [now, deadline, delay, expected] of rows) {
+    it(`returns ${label(expected)} for (${now}, ${deadline}, ${delay})`, () => {
+      assert.equal(retryDelayWithin(now, deadline, delay), expected);
     });
   }
 });
@@ -662,6 +747,9 @@ describe('errorMessage', () => {
   });
   it('tells the player they are solo after UNREACHABLE', () => {
     assert.match(errorMessage('UNREACHABLE'), /solo/i);
+  });
+  it('tells the player to try again in the UNREACHABLE text', () => {
+    assert.match(errorMessage('UNREACHABLE'), /try again/i);
   });
   for (const code of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
     it(`gives the default for the inherited property name ${label(code)}`, () => {

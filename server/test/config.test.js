@@ -15,6 +15,7 @@ test('an empty environment gives the default config without warnings', (t) => {
       allowLocalhost: true,
       allowNullOrigin: false,
       maxConnectionsPerIp: 10,
+      trustProxyHops: 0,
     }
   );
   assert.equal(console.warn.mock.callCount(), 0);
@@ -27,12 +28,14 @@ test('valid environment values are parsed', () => {
     ALLOW_LOCALHOST: 'false',
     ALLOW_NULL_ORIGIN: 'true',
     MAX_CONNECTIONS_PER_IP: '3',
+    TRUST_PROXY_HOPS: '1',
   });
   assert.equal(config.port, 4000);
   assert.deepEqual([...config.corsOrigins], ['https://a.example', 'https://b.example']);
   assert.equal(config.allowLocalhost, false);
   assert.equal(config.allowNullOrigin, true);
   assert.equal(config.maxConnectionsPerIp, 3);
+  assert.equal(config.trustProxyHops, 1);
 });
 
 test('invalid environment values fall back to defaults with one warning each', (t) => {
@@ -57,6 +60,22 @@ test('out-of-range and fractional numbers fall back to defaults', (t) => {
   assert.equal(loadConfig({ MAX_CONNECTIONS_PER_IP: '2.5' }).maxConnectionsPerIp, 10);
   assert.equal(loadConfig({ MAX_CONNECTIONS_PER_IP: '10001' }).maxConnectionsPerIp, 10);
 });
+
+for (const raw of ['true', '-1', '1.5', '11', 'abc']) {
+  test(`TRUST_PROXY_HOPS ${JSON.stringify(raw)} falls back to 0 with exactly one warning`, (t) => {
+    t.mock.method(console, 'warn', () => {});
+    assert.equal(loadConfig({ TRUST_PROXY_HOPS: raw }).trustProxyHops, 0);
+    assert.equal(console.warn.mock.callCount(), 1);
+  });
+}
+
+for (const [raw, expected] of [['0', 0], ['10', 10]]) {
+  test(`TRUST_PROXY_HOPS ${JSON.stringify(raw)} is accepted without a warning`, (t) => {
+    t.mock.method(console, 'warn', () => {});
+    assert.equal(loadConfig({ TRUST_PROXY_HOPS: raw }).trustProxyHops, expected);
+    assert.equal(console.warn.mock.callCount(), 0);
+  });
+}
 
 test('an empty CORS_ORIGINS gives an empty origin list', () => {
   assert.deepEqual([...loadConfig({ CORS_ORIGINS: '' }).corsOrigins], []);

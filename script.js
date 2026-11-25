@@ -34,7 +34,8 @@ if (typeof DURATIONS === 'undefined' || typeof computeStats !== 'function' ||
 
 // multiplayer.js missing only switches multiplayer off; solo never depends on it.
 const MP_AVAILABLE = typeof resolveServerUrl === 'function' && typeof validateRoomState === 'function' &&
-  typeof isServerUsable === 'function' && typeof MP_CONSTANTS === 'object';
+  typeof isServerUsable === 'function' && typeof pickServerUrl === 'function' &&
+  typeof MP_CONSTANTS === 'object';
 
 /* ---------- 1. Configuration ---------- */
 
@@ -52,18 +53,18 @@ const CONFIG = Object.freeze({
   // input, and a long one would push "Go!" past the actual start.
   raceDescribedWordCount: 8,
   resultAnnounceDelayMs: 100, // lets the focus move settle before the result is spoken
-  // Game server origin from the meta tag (null = multiplayer off). There is no
-  // query-string override: the client runs a script from this URL.
+  // Game server origin for this page (null = multiplayer off): the local
+  // server on localhost pages, else the meta tag's URL (see pickServerUrl).
+  // There is no query-string override: the client runs a script from this URL.
   serverUrl: MP_AVAILABLE
-    ? resolveServerUrl(document.querySelector('meta[name="typing-server-url"]')?.content)
+    ? pickServerUrl(document.querySelector('meta[name="typing-server-url"]')?.content, window.location)
     : null,
 });
 
-// Multiplayer is offered only when multiplayer.js loaded, the meta URL is a
-// valid http(s) origin, and that server is reachable from this page (a
-// localhost server only from a localhost page).
-const MP_ENABLED = MP_AVAILABLE && CONFIG.serverUrl !== null &&
-  isServerUsable(CONFIG.serverUrl, window.location.hostname);
+// Multiplayer is offered only when multiplayer.js loaded and this page has a
+// usable server (pickServerUrl rules out file://, the placeholder, a loopback
+// server on a public page and mixed content).
+const MP_ENABLED = MP_AVAILABLE && CONFIG.serverUrl !== null;
 
 const STORAGE_KEYS = Object.freeze({
   history: 'typing:history',
@@ -261,6 +262,8 @@ function createRaceState(session, { passage = '', raceTimeLimitMs = 0 } = {}) {
       rematchDeadline: null,     // performance.now() when the server removes an idle player
       rematchWarned: false,      // the "20 seconds left" warning was given
       rematchWarnTimerId: null,
+      connectDeadline: null,     // performance.now() by which the first connection must succeed
+      waking: false,             // the "waking up the server" message is shown
     },
   };
 }
@@ -414,6 +417,8 @@ function renderPhase() {
   } else {
     dom.typingArea.hidden = finished;
     dom.racePanel.hidden = true;
+    // renderRacePanel does not run in solo, so the spinner class is dropped here.
+    dom.racePanel.classList.remove('is-connecting');
   }
 }
 
@@ -1063,6 +1068,15 @@ function init() {
 // outside `state` (like the announce timers in section 8).
 let mpSocket = null;
 let socketIoPromise = null;
+// The pending Socket.io script attempt, and the pause before the next one.
+let socketIoScript = null;
+let socketIoRetryTimer = 0;
+let socketIoAttemptTimer = 0;
+// Cancels the pending load: set while socketIoPromise is pending, else null.
+let socketIoCancel = null;
+// The waking notice, and the pause before retrying a failed socket connect.
+let wakeNoticeTimer = 0;
+let connectRetryTimer = 0;
 // Exit code for the disconnect the server announced with game:error just
 // before closing the socket (IDLE_TIMEOUT); null means an unexpected drop.
 let mpDisconnectCode = null;
@@ -1097,11 +1111,20 @@ function clearRematchWarnTimer() {
   }
 }
 
+/** Clears the timers of the first connection (waking notice, connect retry). */
+function clearConnectTimers() {
+  clearTimeout(wakeNoticeTimer);
+  wakeNoticeTimer = 0;
+  clearTimeout(connectRetryTimer);
+  connectRetryTimer = 0;
+}
+
 /** Clears every timer the current race state owns, before `state` is replaced. */
 function stopRaceTimers() {
   stopTimer();
   clearFlushTimer();
   clearRematchWarnTimer();
+  clearConnectTimers();
 }
 
 function isFocusIn(element) {
@@ -1131,6 +1154,12 @@ function announceSoon(message, onSpoken) {
 function opponentSubject(label) {
   return label === 'Opponent' ? 'Your opponent' : label;
 }
+
+// Shown (and announced once) when the first connection to a remote server is
+// still pending after MP_CONSTANTS.wakeNoticeDelayMs: the server is asleep.
+// #race-hint is hidden while connecting, so these say how to cancel themselves.
+const WAKE_STATUS = 'Waking up the game server, this can take up to a minute… Choose Solo to cancel.';
+const WAKE_ANNOUNCEMENT = 'Waking up the game server, this can take up to a minute. Choose Solo to cancel.';
 
 // Shown while the server moves a ready player with no opponent to 'waiting'.
 // Never announced: enterWaiting says "Waiting for a new opponent." right after.
@@ -1164,7 +1193,7 @@ function raceStatusText() {
   const mp = state.mp;
   switch (state.phase) {
     case 'connecting':
-      return 'Connecting to the multiplayer server…';
+      return mp.waking ? WAKE_STATUS : 'Connecting to the multiplayer server…';
     case 'waiting': {
       const hasOpponent = getRoomPlayers().some((player) => player.id !== getSelfId());
       return hasOpponent ? 'Waiting for your opponent to be ready…' : 'Waiting for an opponent…';
@@ -1187,6 +1216,8 @@ function raceStatusText() {
 
 function renderRacePanel() {
   dom.raceStatus.textContent = raceStatusText();
+  // Decorative spinner (CSS ::after) so the long wake-up wait visibly is not stuck.
+  dom.racePanel.classList.toggle('is-connecting', state.phase === 'connecting');
 }
 
 function trackMetaText(player) {
@@ -1243,6 +1274,8 @@ function buildRaceTracks(players) {
 /** Updates text and bar width in place; writes only what changed. */
 function renderRaceTracks() {
   const players = getRoomPlayers();
+  // An empty "Live progress" list (while connecting) is noise for screen readers.
+  dom.raceTracks.hidden = players.length === 0;
   const key = JSON.stringify([getSelfId(), ...players.map((player) => player.id)]);
   if (key !== trackKey) {
     buildRaceTracks(players);
@@ -1335,6 +1368,7 @@ function renderRaceResultsStatus() {
 
 function startMultiplayer() {
   if (state.mode === 'multi' || !MP_ENABLED) return;
+  clearConnectTimers();
   stopTimer();
   cancelResultAnnouncement();
   cancelAnimationFrame(restartAnnounceFrame);
@@ -1344,18 +1378,44 @@ function startMultiplayer() {
 
   // instructionsSpoken: the "fix every mistake" rule was read out this session.
   state = createRaceState({ playerId: null, room: null, instructionsSpoken: false });
+  const mp = state.mp;
+  // A timestamp, so throttled timers in a hidden tab never extend the budget.
+  mp.connectDeadline = performance.now() + connectBudgetMs(CONFIG.serverUrl);
   renderMpError();
   renderAll();
   announce('Connecting to the multiplayer server.');
-  loadSocketIo(CONFIG.serverUrl).then(connectSocket, handleSocketIoLoadFailure);
+  // A local server never sleeps, so only a remote one gets the waking notice.
+  if (!isLoopbackUrl(CONFIG.serverUrl)) {
+    wakeNoticeTimer = setTimeout(() => showWakeNotice(mp), MP_CONSTANTS.wakeNoticeDelayMs);
+  }
+  // The `state.mp === mp` checks drop a result that arrives after Solo (or a
+  // new Multiplayer press) replaced this session.
+  loadSocketIo(CONFIG.serverUrl, mp.connectDeadline).then(
+    (ioFactory) => { if (state.mp === mp) connectSocket(ioFactory); },
+    () => { if (state.mp === mp) handleSocketIoLoadFailure(); },
+  );
+}
+
+/**
+ * Shows (once) that the server is probably asleep. Announced once too: there
+ * is no countdown and nothing per retry, so speech stays quiet while waiting.
+ */
+function showWakeNotice(mp) {
+  wakeNoticeTimer = 0;
+  if (state.mp !== mp || state.phase !== 'connecting') return;
+  mp.waking = true;
+  renderRacePanel();
+  announce(WAKE_ANNOUNCEMENT);
 }
 
 /**
  * Loads the Socket.io client from the game server itself (the one allowed
- * outside script), once per page. A failure resets the cache so the next
- * Multiplayer press retries.
+ * outside script), once per page. Failed attempts are retried until
+ * `deadline` (a performance.now() timestamp), because a waking host may
+ * answer with an error page first. Giving up resets the cache so the next
+ * Multiplayer press starts again.
  */
-function loadSocketIo(serverUrl) {
+function loadSocketIo(serverUrl, deadline) {
   if (socketIoPromise !== null) return socketIoPromise;
 
   socketIoPromise = new Promise((resolve, reject) => {
@@ -1365,37 +1425,85 @@ function loadSocketIo(serverUrl) {
       return;
     }
 
-    const script = document.createElement('script');
-    let timeoutId = 0;
-
-    function cleanUp() {
-      clearTimeout(timeoutId);
-      script.onload = null;
-      script.onerror = null;
+    function clearAttemptTimers() {
+      clearTimeout(socketIoAttemptTimer);
+      socketIoAttemptTimer = 0;
+      clearTimeout(socketIoRetryTimer);
+      socketIoRetryTimer = 0;
     }
 
-    function fail() {
-      cleanUp();
-      script.remove();
+    function removeScript() {
+      if (socketIoScript === null) return;
+      socketIoScript.onload = null;
+      socketIoScript.onerror = null;
+      socketIoScript.remove();
+      socketIoScript = null;
+    }
+
+    function succeed() {
+      clearAttemptTimers();
+      if (socketIoScript !== null) {
+        // The loaded script stays in the page; only the handlers go.
+        socketIoScript.onload = null;
+        socketIoScript.onerror = null;
+        socketIoScript = null;
+      }
+      socketIoCancel = null;
+      resolve(window.io);
+    }
+
+    function giveUp() {
+      clearAttemptTimers();
+      removeScript();
+      socketIoCancel = null;
       socketIoPromise = null;
       reject(new Error('Socket.io client could not be loaded'));
     }
 
-    script.onload = () => {
-      if (typeof window.io !== 'function') {
-        fail();
+    function failAttempt() {
+      clearAttemptTimers();
+      removeScript();
+      // A removed script can still run if its download finished meanwhile.
+      if (typeof window.io === 'function') {
+        succeed();
         return;
       }
-      cleanUp();
-      resolve(window.io);
-    };
-    script.onerror = fail;
-    timeoutId = setTimeout(fail, MP_CONSTANTS.connectTimeoutMs);
-    script.src = `${serverUrl}/socket.io/socket.io.js`;
-    document.head.appendChild(script);
+      const delay = retryDelayWithin(performance.now(), deadline, MP_CONSTANTS.wakeRetryDelayMs);
+      if (delay === null) {
+        giveUp();
+        return;
+      }
+      socketIoRetryTimer = setTimeout(attempt, delay);
+    }
+
+    function attempt() {
+      socketIoRetryTimer = 0;
+      const script = document.createElement('script');
+      socketIoScript = script;
+      script.onload = () => {
+        if (typeof window.io === 'function') succeed();
+        else failAttempt(); // e.g. the host's error page instead of the script
+      };
+      script.onerror = failAttempt;
+      socketIoAttemptTimer = setTimeout(failAttempt, Math.max(1000, deadline - performance.now()));
+      script.src = `${serverUrl}/socket.io/socket.io.js`;
+      document.head.appendChild(script);
+    }
+
+    socketIoCancel = giveUp;
+    attempt();
   });
 
   return socketIoPromise;
+}
+
+/**
+ * Stops a pending script load (Solo pressed while waking), so no retry runs
+ * later and the next Multiplayer press starts a fresh load. A loaded script
+ * stays cached. The pending promise rejects; startMultiplayer ignores it.
+ */
+function cancelSocketIoLoad() {
+  if (socketIoCancel !== null) socketIoCancel();
 }
 
 function handleSocketIoLoadFailure() {
@@ -1415,7 +1523,8 @@ function connectSocket(ioFactory) {
     socket = ioFactory(CONFIG.serverUrl, {
       transports: ['websocket'],
       reconnection: false,
-      timeout: MP_CONSTANTS.connectTimeoutMs,
+      // Whatever is left of the budget; a timeout ends in connect_error.
+      timeout: Math.max(1000, state.mp.connectDeadline - performance.now()),
       // A fresh connection per session, never a cached manager from a closed one.
       forceNew: true,
     });
@@ -1426,7 +1535,7 @@ function connectSocket(ioFactory) {
 
   mpSocket = socket;
   socket.on('connect', () => onConnect(socket));
-  socket.on('connect_error', () => onConnectError(socket));
+  socket.on('connect_error', () => onConnectError(socket, ioFactory));
   socket.on('disconnect', () => onDisconnect(socket));
   for (const [event, handler] of Object.entries(SERVER_EVENT_HANDLERS)) {
     socket.on(event, (data) => {
@@ -1437,8 +1546,12 @@ function connectSocket(ioFactory) {
 
 function onConnect(socket) {
   if (!isCurrentSocket(socket)) return;
+  // The server is awake once the socket connects, so the waking notice must not
+  // appear while the join ack is still on its way.
+  clearTimeout(wakeNoticeTimer);
+  wakeNoticeTimer = 0;
   // With a timeout, a server that never answers still ends in a clear message.
-  socket.timeout(MP_CONSTANTS.connectTimeoutMs).emit('room:join', {}, (error, ack) => {
+  socket.timeout(MP_CONSTANTS.joinAckTimeoutMs).emit('room:join', {}, (error, ack) => {
     if (!isCurrentSocket(socket)) return;
     if (error) {
       leaveMultiplayer('UNREACHABLE');
@@ -1448,8 +1561,28 @@ function onConnect(socket) {
   });
 }
 
-function onConnectError(socket) {
-  if (isCurrentSocket(socket)) leaveMultiplayer('UNREACHABLE');
+/**
+ * A failed connect is retried while the budget lasts: the script may be
+ * cached from an earlier session while the server has gone back to sleep.
+ */
+function onConnectError(socket, ioFactory) {
+  if (!isCurrentSocket(socket)) return;
+  if (state.phase !== 'connecting') {
+    leaveMultiplayer('UNREACHABLE');
+    return;
+  }
+  const mp = state.mp;
+  teardownSocket();
+  const delay = retryDelayWithin(performance.now(), mp.connectDeadline, MP_CONSTANTS.wakeRetryDelayMs);
+  if (delay === null) {
+    leaveMultiplayer('UNREACHABLE');
+    return;
+  }
+  clearTimeout(connectRetryTimer);
+  connectRetryTimer = setTimeout(() => {
+    connectRetryTimer = 0;
+    if (state.mp === mp) connectSocket(ioFactory);
+  }, delay);
 }
 
 /** Any disconnect we did not cause (leaveMultiplayer removes this listener first). */
@@ -1458,6 +1591,8 @@ function onDisconnect(socket) {
 }
 
 function onJoinAck(raw) {
+  // Connected: no waking notice or connect retry may follow, whatever the answer.
+  clearConnectTimers();
   const ack = validateJoinAck(raw);
   if (ack === null) {
     leaveMultiplayer('BAD_RESPONSE'); // generic message
@@ -1807,7 +1942,7 @@ function requestRematch() {
   renderRaceResultsStatus(); // the button changes even when the text does not
 
   const socket = mpSocket;
-  socket.timeout(MP_CONSTANTS.connectTimeoutMs).emit('race:rematch', {}, (error, ack) => {
+  socket.timeout(MP_CONSTANTS.ackTimeoutMs).emit('race:rematch', {}, (error, ack) => {
     // Ignore a late answer once a new race (or solo) has replaced this state.
     if (!isCurrentSocket(socket) || state.mp !== mp) return;
     onRematchAck(error ? null : ack);
@@ -1857,7 +1992,8 @@ function leaveMultiplayer(code) {
   // disconnect mid-race leaves the user able to type); otherwise it stays put.
   const moveFocus = isFocusIn(dom.typingArea) || isFocusIn(dom.racePanel) || isFocusIn(dom.results);
   teardownSocket();
-  stopRaceTimers();
+  cancelSocketIoLoad();
+  stopRaceTimers(); // also the waking notice and connect retry timers
   const duration = loadDuration();
   restart(duration, { message: code ? '' : `Solo mode. New test ready, ${duration} seconds.`, moveFocus });
   mpErrorCode = code || null;

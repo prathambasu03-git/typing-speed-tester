@@ -527,6 +527,26 @@ body[data-phase="idle"] .caret {
   font-weight: 600;
 }
 
+/* Decorative: shows the long wake-up wait is still in progress. */
+.race-panel.is-connecting .race-status::after {
+  content: "";
+  display: inline-block;
+  width: 0.6em;
+  height: 0.6em;
+  margin-left: 0.5em;
+  border: 2px solid var(--text);
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -0.05em;
+  animation: race-spin 1s linear infinite;
+}
+
+@keyframes race-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .race-tracks {
   list-style: none;
   margin: 1rem 0 0;
@@ -691,6 +711,10 @@ body[data-phase="idle"] .caret {
   }
 
   body[data-phase="idle"] .caret {
+    animation: none;
+  }
+
+  .race-panel.is-connecting .race-status::after {
     animation: none;
   }
 }

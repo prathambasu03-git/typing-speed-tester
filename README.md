@@ -1,8 +1,8 @@
 # Typing Speed Tester
 
-A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, plus a real-time two-player race mode (beta) backed by a small Node.js and Socket.io server. The browser app has no frameworks, no build step and no dependencies. It comes with 464 client tests and 190 server tests, all run with Node's built-in test runner.
+A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, plus a real-time two-player race mode (beta) backed by a small Node.js and Socket.io server. The browser app has no frameworks, no build step and no dependencies. It comes with 529 client tests and 233 server tests, all run with Node's built-in test runner.
 
-**Live demo:** [https://prathambasu03-git.github.io/typing-speed-tester/](https://prathambasu03-git.github.io/typing-speed-tester/) (solo mode only until the game server is deployed; see [Roadmap](#roadmap))
+**Live demo:** [https://prathambasu03-git.github.io/typing-speed-tester/](https://prathambasu03-git.github.io/typing-speed-tester/) (solo mode for now. The game server is ready to deploy to Render, and Multiplayer appears on the live site once its URL is set in `index.html`; see [Deploy the game server](#deploy-the-game-server))
 
 ![Typing test in solo mode, dark theme, showing the word area, live WPM, accuracy and the countdown timer](docs/screenshot.png)
 
@@ -27,6 +27,7 @@ A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, 
 - You finish only when every character is correct, so mashing keys cannot win
 - Results show each player's place, WPM, accuracy and time, all computed by the server
 - **Race again** starts a rematch, with a new passage and a new countdown
+- A sleeping free-tier server can take about a minute to wake. After 3 seconds the page says it is waking the server (with a small spinner, and **Solo** cancels), waits up to 90 seconds, then falls back to solo with a clear message
 - If the server cannot be reached, the page says so and falls back to solo
 - After a race, a player who does not press **Race again** within 60 seconds leaves the room. The page shows a notice and a spoken warning first
 
@@ -50,7 +51,8 @@ Multiplayer results are not saved to your solo history or personal bests.
 - **Server-authoritative design.** The client sends only keystrokes. The server replays them against its own copy of the passage and decides what is correct, when a player finishes, and the WPM, accuracy, time and finish order. Scores or times sent by a client are ignored.
 - **Shared logic.** The server reuses the browser's `stats.js` and `words.js`, so WPM and accuracy come from the same code on both sides.
 - **Protocol design.** Every Socket.io event (name, direction, payload shape, limits and error codes) is specified in [`docs/PROTOCOL.md`](docs/PROTOCOL.md), and both sides implement it.
-- **Defensive server.** Payload validation, a per-socket rate limit (token bucket), a per-IP connection cap, a 4 KB message size limit, CORS restricted to the GitHub Pages origin and localhost, a 10-second join timeout and a 60-second idle removal after a race.
+- **Defensive server.** Payload validation, a per-socket rate limit (token bucket), a per-IP connection cap that reads the real client IP behind a reverse proxy (`TRUST_PROXY_HOPS`, so players are not all counted as the proxy's address), a 4 KB message size limit, CORS restricted to the GitHub Pages origin and localhost, a 10-second join timeout and a 60-second idle removal after a race.
+- **Deployment-ready.** A Render Blueprint ([`render.yaml`](render.yaml)) describes the WebSocket server on Render's free tier, with a health check, a pinned Node version and build filters so client-only pushes do not restart it. The client handles the free tier's cold start. Not live yet: see [Deploy the game server](#deploy-the-game-server).
 
 ### Quality
 
@@ -94,7 +96,7 @@ connecting ──▶ waiting ──▶ countdown ──▶ running ──▶ fin
 
 ### Multiplayer flow
 
-1. Pressing **Multiplayer** loads `<server-url>/socket.io/socket.io.js` and opens a WebSocket connection. The server URL comes from `<meta name="typing-server-url">` in `index.html`.
+1. Pressing **Multiplayer** loads `<server-url>/socket.io/socket.io.js` and opens a WebSocket connection. Pages on `localhost` always use `http://localhost:3000`. Elsewhere the server URL comes from `<meta name="typing-server-url">` in `index.html`; while it holds the placeholder `REPLACE_WITH_RENDER_URL`, the page stays solo-only. Pages opened from `file://` are always solo-only. If the server is asleep, the client waits up to 90 seconds for it to wake.
 2. The player joins the single room. When two players are in, the server sends a 3-second countdown with the passage, then the start signal.
 3. While typing, the client sends batches of keystrokes (Backspace included). The server replays them, keeps each player's position and keystroke counts, and broadcasts everyone's progress.
 4. The race ends when both players finish or after 2 minutes. The server sends the results and finish order.
@@ -129,7 +131,7 @@ A record is only accepted if its WPM is 0 to 1000, its accuracy is 0 to 100, its
 - **Screen readers:** The input is described by a text version of the upcoming words (`aria-describedby`). A single polite live region announces key moments: results and restarts in solo; connected and waiting, countdown, "Go!", opponent halfway, each finish and race over in multiplayer. There is no per-second or per-update speech. Load and connection errors use `role="alert"`.
 - **Live progress:** Race progress bars are `aria-hidden` decoration. The same information is in the text beside each bar, for example a percentage and WPM.
 - **Contrast:** Text contrast is at least 4.5:1 in both themes.
-- **Motion:** Caret, scroll and progress bar animations are turned off when `prefers-reduced-motion` is set.
+- **Motion:** Caret, scroll, progress bar and connecting-spinner animations are turned off when `prefers-reduced-motion` is set.
 - **Small screens:** No horizontal scroll at 360px wide.
 
 ## Run locally
@@ -156,7 +158,8 @@ npx serve -l 5000 .                  # in a second terminal, from the repo root
 
 Then open http://localhost:5000 in two browser windows (or two browsers), press **Multiplayer** in both, and race.
 
-- Opening `index.html` from the file system does not show Multiplayer. Such pages send `Origin: null`, which the server refuses unless `ALLOW_NULL_ORIGIN=true` (for local development only).
+- Opening `index.html` from the file system (`file://`) is always solo-only, because such pages send `Origin: null`. Serve the folder instead.
+- Pages on `localhost` or `127.0.0.1` always use `http://localhost:3000`, whatever the meta tag says, so local development needs no edits.
 - A `.env` file is optional. To change settings such as the port or allowed origins, copy `server/.env.example` to `server/.env` and edit it.
 
 ## Run the tests
@@ -174,16 +177,17 @@ npm install --prefix server
 npm test --prefix server
 ```
 
-The 464 client tests cover:
+The 529 client tests cover:
 
 - boundary validation of stored records (for example WPM 1000 is accepted, 1000.1 is not)
 - the accuracy floor, so one mistake in 250 keystrokes gives 99%
 - WPM and accuracy with zero, negative, `NaN` and infinite inputs
 - deterministic word generation through an injected random function
 - the multiplayer helpers: server URL checks, keystroke batching, and validators that reject malformed server events
+- choosing the game server URL and the cold-start connecting flow (fake timers)
 - loading the scripts in a `node:vm` context with no `document` or `window`, which proves they are DOM-free
 
-The 190 server tests cover payload validation, origin rules, the rate limiter, the race state machine and scoring, timeouts, and full races between two real Socket.io clients: finishing order, time limits, a third player being turned away, disconnects mid-race and client-sent scores being ignored.
+The 233 server tests cover payload validation, origin rules, settings parsing, client IP detection behind a proxy, the rate limiter, the race state machine and scoring, timeouts, and full races between two real Socket.io clients: finishing order, time limits, a third player being turned away, disconnects mid-race and client-sent scores being ignored.
 
 ## Project structure
 
@@ -203,6 +207,7 @@ tests/
     load-script.js         shared fake-DOM loader for script.js tests
 docs/
   PROTOCOL.md              every Socket.io event: payloads, limits, error codes
+  DEPLOY.md                step-by-step guide to deploying the game server on Render
   screenshot.png           README screenshot
 server/
   package.json             scripts (start, test), Express and Socket.io dependencies
@@ -215,11 +220,13 @@ server/
     roomStore.js           in-memory room store
     validate.js            payload validation (pure)
     origin.js              CORS origin rules (pure)
+    clientIp.js            real client IP behind a reverse proxy, for the per-IP cap (pure)
     rateLimit.js           per-socket token bucket (pure)
     config.js              reads and checks environment settings
     constants.js           protocol constants
     shared.js              reuses the root stats.js and words.js
   test/                    node:test suites, including two-client race simulations
+render.yaml                Render Blueprint for the game server (free tier, no secrets)
 .nojekyll                  tells GitHub Pages to serve the files as they are
 ```
 
@@ -234,16 +241,27 @@ server/
 3. On GitHub, open **Settings → Pages**. Under **Build and deployment**, choose **Deploy from a branch**, then pick branch `main` and folder `/ (root)`. Click **Save**.
 4. After about a minute the site is live at https://prathambasu03-git.github.io/typing-speed-tester/.
 
-GitHub Pages serves only the static client. Until the game server is deployed, `<meta name="typing-server-url">` in `index.html` points to `http://localhost:3000`, and the live site hides Multiplayer because a page that is not on localhost cannot use a localhost server.
+GitHub Pages serves only the static client. `<meta name="typing-server-url">` in `index.html` still holds the placeholder `REPLACE_WITH_RENDER_URL`, so the live site shows solo only. Multiplayer appears there once the tag holds the Render URL of the game server (see the next section). The first connection after the server has been idle can take about a minute, while the free instance wakes up. Pages opened from `file://` are always solo-only, and pages on `localhost` always use `http://localhost:3000`.
+
+## Deploy the game server
+
+The multiplayer server is set up for Render's free tier with a Blueprint, [`render.yaml`](render.yaml): one Node web service, rooms kept in memory, no Docker and no database. Deploying takes about 15 minutes:
+
+1. Apply the Blueprint on Render and wait for the service to go live.
+2. Put the service URL in the `typing-server-url` meta tag in `index.html`, then push.
+
+The step-by-step guide, including region choice, environment variables, a cold-start check, a proxy hop check for `TRUST_PROXY_HOPS`, free-tier limits and troubleshooting, is in [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## Roadmap
 
-Multiplayer is being built in milestones. M1, one room racing end to end, is done. Next:
+Multiplayer is being built in milestones:
 
+- **M1:** one room races end to end ✓
+- **Deploy:** the game server on Render's free tier ([`render.yaml`](render.yaml), [`docs/DEPLOY.md`](docs/DEPLOY.md)): ready; live once the Render URL is in `index.html`
 - **M2:** lobby and room codes
 - **M3:** server-side anti-cheat
 - **M4:** saved results and a leaderboard
-- **M5:** Docker, CI and deployment. Until then the live demo is solo-only, and the server URL meta tag points to localhost.
+- **Later:** Docker Compose and GitHub Actions CI
 
 Other ideas:
 

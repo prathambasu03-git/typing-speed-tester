@@ -1,0 +1,44 @@
+# Render Blueprint for the multiplayer game server (free tier, in-memory rooms).
+# Apply it on Render with New -> Blueprint. Step-by-step guide: docs/DEPLOY.md.
+# No secrets here: every value below is safe to commit.
+services:
+  - type: web
+    name: typing-speed-tester-server
+    runtime: node
+    plan: free
+    # Singapore: closest Render region to players in India (Render's default is oregon).
+    # Cannot be changed in place after the service exists; pick before applying.
+    region: singapore
+    branch: main
+    # No rootDir: server/src/shared.js requires ../../stats.js and ../../words.js,
+    # so the service builds from the repo root and cd's into server/.
+    buildCommand: cd server && npm ci --omit=dev
+    # node directly (not npm start) so Render's SIGTERM reaches the shutdown handler.
+    startCommand: node server/src/index.js
+    healthCheckPath: /health
+    autoDeploy: true
+    # Only redeploy when server code or the shared files change.
+    buildFilter:
+      paths:
+        - server/**
+        - stats.js
+        - words.js
+      ignoredPaths:
+        - server/test/**
+    # PORT is not listed: Render sets it and server/src/config.js reads it.
+    envVars:
+      # Pins Node 22 LTS (Render reads this before .nvmrc or package.json engines).
+      - key: NODE_VERSION
+        value: "22"
+      # The GitHub Pages origin only: no path, no trailing slash.
+      - key: CORS_ORIGINS
+        value: https://prathambasu03-git.github.io
+      - key: ALLOW_LOCALHOST
+        value: "false"
+      - key: ALLOW_NULL_ORIGIN
+        value: "false"
+      # Render puts one proxy in front of the app (see the hop check in docs/DEPLOY.md).
+      - key: TRUST_PROXY_HOPS
+        value: "1"
+      - key: MAX_CONNECTIONS_PER_IP
+        value: "10"

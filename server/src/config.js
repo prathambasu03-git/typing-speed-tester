@@ -8,6 +8,7 @@ const DEFAULT_CONFIG = Object.freeze({
   allowLocalhost: true,
   allowNullOrigin: false,
   maxConnectionsPerIp: 10,
+  trustProxyHops: 0,
 });
 
 const ENV_FILE = path.join(__dirname, '..', '.env');
@@ -66,6 +67,8 @@ function loadConfig(env = process.env) {
       10000,
       DEFAULT_CONFIG.maxConnectionsPerIp
     ),
+    // A hop count, not a boolean, so a longer proxy chain is a config change.
+    trustProxyHops: parseIntInRange('TRUST_PROXY_HOPS', env.TRUST_PROXY_HOPS, 0, 10, DEFAULT_CONFIG.trustProxyHops),
   });
 }
 

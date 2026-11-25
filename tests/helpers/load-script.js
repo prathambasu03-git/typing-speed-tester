@@ -8,6 +8,10 @@
  * Only Node built-ins are used. The fake DOM is deliberately small: plain
  * objects with recording stubs, one per id found in index.html, so that
  * `init()` in script.js can run and its effects can be observed.
+ *
+ * Timers (setTimeout, requestAnimationFrame) and performance.now() share one
+ * fake clock. Nothing runs until a test calls `clock.advance(ms)`, so tests
+ * that never advance it see inert timers.
  */
 
 const vm = require('node:vm');
@@ -16,6 +20,13 @@ const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..', '..');
 const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
+
+const META_PATTERN = /<meta\s+name="typing-server-url"\s+content="([^"]*)"/;
+
+/** The typing-server-url meta content in `html` (index.html by default). */
+function readMetaContent(html = read('index.html')) {
+  return (html.match(META_PATTERN) || [])[1];
+}
 
 /** id -> whether the element carries the `hidden` attribute in index.html. */
 function idsFromHtml(html) {
@@ -49,6 +60,7 @@ function createElement(tagName, extra = {}, owner = { document: null }) {
     value: '',
     hidden: false,
     disabled: false,
+    removed: false,
     children: [],
     attributes: {},
     listeners: {},
@@ -75,6 +87,7 @@ function createElement(tagName, extra = {}, owner = { document: null }) {
       this.children = [];
       for (const node of nodes) this.appendChild(node);
     },
+    remove() { this.removed = true; },
     contains(other) { return other === this || this.children.includes(other); },
     closest() { return null; },
     focus() { owner.document.activeElement = this; },
@@ -88,17 +101,64 @@ function createElement(tagName, extra = {}, owner = { document: null }) {
   return el;
 }
 
+/** A fake clock for setTimeout, requestAnimationFrame and performance.now(). */
+function createClock() {
+  let now = 0;
+  let nextId = 1;
+  const pending = new Map(); // id -> { at, fn }
+  const schedule = (fn, delay) => {
+    const id = nextId++;
+    pending.set(id, { at: now + Math.max(0, Number(delay) || 0), fn });
+    return id;
+  };
+  const cancel = (id) => { pending.delete(id); };
+  return {
+    now: () => now,
+    setTimeout: (fn, delay) => schedule(fn, delay),
+    clearTimeout: cancel,
+    requestAnimationFrame: (fn) => schedule(() => fn(now), 16),
+    cancelAnimationFrame: cancel,
+    pendingCount: () => pending.size,
+    /** Runs every timer due within `ms`, in time order, moving `now` along. */
+    advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        let dueId = null;
+        let dueAt = Infinity;
+        for (const [id, timer] of pending) {
+          if (timer.at <= end && timer.at < dueAt) {
+            dueAt = timer.at;
+            dueId = id;
+          }
+        }
+        if (dueId === null) break;
+        const { fn } = pending.get(dueId);
+        pending.delete(dueId);
+        now = dueAt;
+        fn();
+      }
+      now = end;
+    },
+  };
+}
+
 /**
  * @param {object} options
  * @param {boolean} options.withMultiplayer  load multiplayer.js before script.js
- * @param {string}  [options.hostname]       window.location.hostname
+ * @param {string}  [options.hostname]       window.location.hostname ('localhost')
+ * @param {string}  [options.protocol]       window.location.protocol ('http:')
+ * @param {string|null} [options.metaContent] typing-server-url meta content;
+ *          omitted = read from index.html, null = no meta tag at all
  * @param {string}  [options.scriptSource]   replacement source for script.js
- * @returns {{ ctx, elements, document, window, error }} error is the thrown
- *          value, or null when every script ran cleanly.
+ * @returns {{ ctx, elements, document, window, clock, modeButtons, error }}
+ *          error is the thrown value, or null when every script ran cleanly.
  */
-function loadApp({ withMultiplayer, hostname = 'localhost', scriptSource } = {}) {
+function loadApp(options = {}) {
+  const { withMultiplayer, hostname = 'localhost', protocol = 'http:', scriptSource } = options;
   const html = read('index.html');
-  const metaUrl = (html.match(/<meta\s+name="typing-server-url"\s+content="([^"]*)"/) || [])[1];
+  let metaUrl;
+  if (options.metaContent === undefined) metaUrl = readMetaContent(html);
+  else if (options.metaContent !== null) metaUrl = String(options.metaContent);
 
   // Filled in once `document` exists; elements' focus()/blur() write to it.
   const owner = { document: null };
@@ -116,6 +176,8 @@ function loadApp({ withMultiplayer, hostname = 'localhost', scriptSource } = {})
   });
   const modeButtons = buttons('mode', ['solo', 'multi']);
   const durationButtons = buttons('duration', ['15', '30', '60']);
+  // Inside #mode, so the click delegation's dom.mode.contains(button) holds.
+  if (elements.has('mode')) elements.get('mode').children.push(...modeButtons);
 
   const document = {
     documentElement: make('html'),
@@ -151,9 +213,10 @@ function loadApp({ withMultiplayer, hostname = 'localhost', scriptSource } = {})
     clear: () => store.clear(),
   };
 
-  const timers = [];
+  const clock = createClock();
+  const href = protocol === 'file:' ? 'file:///index.html' : `${protocol}//${hostname}/`;
   const window = {
-    location: { hostname, protocol: 'http:', href: `http://${hostname}/` },
+    location: { hostname, protocol, href },
     listeners: {},
     addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
     removeEventListener() {},
@@ -166,11 +229,11 @@ function loadApp({ withMultiplayer, hostname = 'localhost', scriptSource } = {})
     localStorage,
     console,
     URL, // browser global used by multiplayer.js
-    performance: { now: () => 0 },
-    requestAnimationFrame: (fn) => { timers.push(fn); return timers.length; },
-    cancelAnimationFrame: () => {},
-    setTimeout: (fn) => { timers.push(fn); return timers.length; },
-    clearTimeout: () => {},
+    performance: { now: clock.now },
+    requestAnimationFrame: clock.requestAnimationFrame,
+    cancelAnimationFrame: clock.cancelAnimationFrame,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
     setInterval: () => 1,
     clearInterval: () => {},
     getComputedStyle: () => ({ lineHeight: '32px' }),
@@ -188,7 +251,7 @@ function loadApp({ withMultiplayer, hostname = 'localhost', scriptSource } = {})
     error = err;
   }
 
-  return { ctx, elements, document, window, error };
+  return { ctx, elements, document, window, clock, modeButtons, error };
 }
 
-module.exports = { loadApp };
+module.exports = { loadApp, readMetaContent };

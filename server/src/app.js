@@ -9,6 +9,7 @@ const { Server } = require('socket.io');
 const { DEFAULT_CONFIG } = require('./config');
 const { MAX_HTTP_BUFFER_SIZE } = require('./constants');
 const { isAllowedOrigin } = require('./origin');
+const { getClientIp } = require('./clientIp');
 const { registerGame } = require('./game');
 
 function buildOriginConfig(options) {
@@ -51,13 +52,21 @@ function createApp() {
 
 /**
  * Options (all optional): corsOrigins, allowLocalhost, allowNullOrigin,
- * maxConnectionsPerIp, countdownMs, raceTimeLimitMs, broadcastIntervalMs,
+ * maxConnectionsPerIp, trustProxyHops, countdownMs, raceTimeLimitMs, broadcastIntervalMs,
  * rematchTimeoutMs, joinTimeoutMs, pickPassage, rateLimit { capacity, refillPerSec }, now, store.
  */
 function createServer(options = {}) {
   const originConfig = buildOriginConfig(options);
   const maxConnectionsPerIp = options.maxConnectionsPerIp ?? DEFAULT_CONFIG.maxConnectionsPerIp;
+  const trustProxyHops = options.trustProxyHops ?? DEFAULT_CONFIG.trustProxyHops;
   const connections = createConnectionCounter();
+
+  // One key function for the cap check and the count, both fed the same
+  // handshake request, so they always agree. Express `trust proxy` stays off:
+  // no HTTP route reads req.ip.
+  function ipOf(req) {
+    return getClientIp(req.socket.remoteAddress, req.headers['x-forwarded-for'], trustProxyHops);
+  }
 
   const app = createApp();
   const httpServer = http.createServer(app);
@@ -71,7 +80,7 @@ function createServer(options = {}) {
         callback('Origin not allowed', false);
         return;
       }
-      const ip = req.socket.remoteAddress || 'unknown';
+      const ip = ipOf(req);
       if (connections.count(ip) >= maxConnectionsPerIp) {
         callback('Too many connections', false);
         return;
@@ -84,7 +93,7 @@ function createServer(options = {}) {
 
   // Count at the engine level so the number drops on every kind of close.
   io.engine.on('connection', (rawSocket) => {
-    const ip = rawSocket.remoteAddress || 'unknown';
+    const ip = ipOf(rawSocket.request);
     connections.increment(ip);
     rawSocket.once('close', () => connections.decrement(ip));
   });
