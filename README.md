@@ -2,7 +2,7 @@
 
 A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, plus a real-time two-player race mode (beta) backed by a small Node.js and Socket.io server. The browser app has no frameworks, no build step and no dependencies. It comes with 529 client tests and 233 server tests, all run with Node's built-in test runner.
 
-**Live demo:** [https://prathambasu03-git.github.io/typing-speed-tester/](https://prathambasu03-git.github.io/typing-speed-tester/) (solo mode for now. The game server is ready to deploy to Render, and Multiplayer appears on the live site once its URL is set in `index.html`; see [Deploy the game server](#deploy-the-game-server))
+**Live demo:** [https://prathambasu03-git.github.io/typing-speed-tester/](https://prathambasu03-git.github.io/typing-speed-tester/) (solo and multiplayer. The first multiplayer connection after the server has been idle can take about a minute while the free Render instance wakes up.)
 
 ![Typing test in solo mode, dark theme, showing the word area, live WPM, accuracy and the countdown timer](docs/screenshot.png)
 
@@ -52,7 +52,7 @@ Multiplayer results are not saved to your solo history or personal bests.
 - **Shared logic.** The server reuses the browser's `stats.js` and `words.js`, so WPM and accuracy come from the same code on both sides.
 - **Protocol design.** Every Socket.io event (name, direction, payload shape, limits and error codes) is specified in [`docs/PROTOCOL.md`](docs/PROTOCOL.md), and both sides implement it.
 - **Defensive server.** Payload validation, a per-socket rate limit (token bucket), a per-IP connection cap that reads the real client IP behind a reverse proxy (`TRUST_PROXY_HOPS`, so players are not all counted as the proxy's address), a 4 KB message size limit, CORS restricted to the GitHub Pages origin and localhost, a 10-second join timeout and a 60-second idle removal after a race.
-- **Deployment-ready.** A Render Blueprint ([`render.yaml`](render.yaml)) describes the WebSocket server on Render's free tier, with a health check, a pinned Node version and build filters so client-only pushes do not restart it. The client handles the free tier's cold start. Not live yet: see [Deploy the game server](#deploy-the-game-server).
+- **Deployed on Render.** A Render Blueprint ([`render.yaml`](render.yaml)) describes the WebSocket server on Render's free tier, with a health check, a pinned Node version and build filters so client-only pushes do not restart it. The client handles the free tier's cold start. It runs at https://typing-speed-tester-server.onrender.com; see [Deploy the game server](#deploy-the-game-server).
 
 ### Quality
 
@@ -96,7 +96,7 @@ connecting ──▶ waiting ──▶ countdown ──▶ running ──▶ fin
 
 ### Multiplayer flow
 
-1. Pressing **Multiplayer** loads `<server-url>/socket.io/socket.io.js` and opens a WebSocket connection. Pages on `localhost` always use `http://localhost:3000`. Elsewhere the server URL comes from `<meta name="typing-server-url">` in `index.html`; while it holds the placeholder `REPLACE_WITH_RENDER_URL`, the page stays solo-only. Pages opened from `file://` are always solo-only. If the server is asleep, the client waits up to 90 seconds for it to wake.
+1. Pressing **Multiplayer** loads `<server-url>/socket.io/socket.io.js` and opens a WebSocket connection. Pages on `localhost` always use `http://localhost:3000`. Elsewhere the server URL comes from `<meta name="typing-server-url">` in `index.html`; on the live site that is the Render server (in a fork, the placeholder `REPLACE_WITH_RENDER_URL` keeps the page solo-only). Pages opened from `file://` are always solo-only. If the server is asleep, the client waits up to 90 seconds for it to wake.
 2. The player joins the single room. When two players are in, the server sends a 3-second countdown with the passage, then the start signal.
 3. While typing, the client sends batches of keystrokes (Backspace included). The server replays them, keeps each player's position and keystroke counts, and broadcasts everyone's progress.
 4. The race ends when both players finish or after 2 minutes. The server sends the results and finish order.
@@ -241,7 +241,7 @@ render.yaml                Render Blueprint for the game server (free tier, no s
 3. On GitHub, open **Settings → Pages**. Under **Build and deployment**, choose **Deploy from a branch**, then pick branch `main` and folder `/ (root)`. Click **Save**.
 4. After about a minute the site is live at https://prathambasu03-git.github.io/typing-speed-tester/.
 
-GitHub Pages serves only the static client. `<meta name="typing-server-url">` in `index.html` still holds the placeholder `REPLACE_WITH_RENDER_URL`, so the live site shows solo only. Multiplayer appears there once the tag holds the Render URL of the game server (see the next section). The first connection after the server has been idle can take about a minute, while the free instance wakes up. Pages opened from `file://` are always solo-only, and pages on `localhost` always use `http://localhost:3000`.
+GitHub Pages serves only the static client. `<meta name="typing-server-url">` in `index.html` holds the game server URL, https://typing-speed-tester-server.onrender.com, so the live site offers Multiplayer. In a fork, deploy your own server (see the next section) and put its URL in that tag; the placeholder `REPLACE_WITH_RENDER_URL` keeps the site solo-only. The first connection after the server has been idle can take about a minute, while the free instance wakes up. Pages opened from `file://` are always solo-only, and pages on `localhost` always use `http://localhost:3000`.
 
 ## Deploy the game server
 
@@ -257,7 +257,7 @@ The step-by-step guide, including region choice, environment variables, a cold-s
 Multiplayer is being built in milestones:
 
 - **M1:** one room races end to end ✓
-- **Deploy:** the game server on Render's free tier ([`render.yaml`](render.yaml), [`docs/DEPLOY.md`](docs/DEPLOY.md)): ready; live once the Render URL is in `index.html`
+- **Deploy:** the game server on Render's free tier ([`render.yaml`](render.yaml), [`docs/DEPLOY.md`](docs/DEPLOY.md)) ✓
 - **M2:** lobby and room codes
 - **M3:** server-side anti-cheat
 - **M4:** saved results and a leaderboard
