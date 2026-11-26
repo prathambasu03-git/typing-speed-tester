@@ -35,6 +35,14 @@
   </header>
 
   <main class="container">
+    <!-- Shown by script.js when the page opens with a valid #room= invite. It never contacts the server by itself. -->
+    <section id="invite" class="invite card" aria-labelledby="invite-title" hidden>
+      <h2 id="invite-title" class="card-title">You're invited to a race</h2>
+      <p id="invite-text">Room <span id="invite-code" class="room-code" aria-hidden="true"></span><span id="invite-code-spelled" class="visually-hidden"></span>. Joining connects to the game server, which can take up to a minute to wake up.</p>
+      <button id="invite-join-btn" class="primary-btn" type="button" aria-describedby="invite-text">Join room</button>
+      <button id="invite-dismiss-btn" class="secondary-btn" type="button">Not now</button>
+    </section>
+
     <section class="toolbar" aria-label="Test settings and live stats">
       <!-- Shown by script.js only when multiplayer is available and its server is reachable from this page. -->
       <div id="mode" class="settings" role="group" aria-label="Game mode" hidden>
@@ -73,10 +81,51 @@
     <p id="mp-error" class="load-error" role="alert" hidden></p>
 
     <section id="race-panel" class="race-panel card" aria-labelledby="race-title" hidden>
-      <h2 id="race-title" class="card-title" tabindex="-1">race</h2>
+      <h2 id="race-title" class="card-title" tabindex="-1">multiplayer</h2>
+      <!-- Create or join. No socket is opened until one of these is pressed. -->
+      <div id="mp-menu" class="mp-menu" hidden>
+        <button id="create-room-btn" class="primary-btn" type="button"
+                aria-describedby="menu-error">Create a room</button>
+        <!-- Next to Create, which it is about. Not live: focus always returns to
+             Create on a create error, and its description reads this once. -->
+        <p id="menu-error" class="load-error menu-error" hidden></p>
+        <p class="mp-menu-or muted">or join a friend's room</p>
+        <form id="join-form" class="join-form" novalidate>
+          <label for="room-code-input" class="field-label">Room code</label>
+          <p id="room-code-hint" class="hint">6 letters and numbers, from your invite.</p>
+          <div class="join-row">
+            <input id="room-code-input" class="code-input" type="text" maxlength="16"
+                   autocomplete="off" autocapitalize="characters" autocorrect="off"
+                   spellcheck="false" inputmode="text" enterkeyhint="go"
+                   aria-describedby="room-code-hint room-code-error">
+            <button id="join-room-btn" class="secondary-btn" type="submit">Join room</button>
+          </div>
+          <!-- Not live: read through aria-describedby when focus moves to the input. -->
+          <p id="room-code-error" class="field-error" hidden></p>
+        </form>
+      </div>
+      <!-- The code is aria-hidden and paired with a spelled-out copy, so it is read once, one character at a time. -->
+      <div id="room-info" class="room-info" hidden>
+        <div class="room-code-row">
+          <p class="room-code-line"><span aria-hidden="true">Room code</span>
+            <span id="room-code" class="room-code" aria-hidden="true"></span>
+            <span id="room-code-spelled" class="visually-hidden"></span></p>
+          <button id="copy-link-btn" class="secondary-btn copy-btn" type="button">Copy invite link</button>
+        </div>
+        <p id="copy-status" class="hint"></p>
+        <label for="room-link" class="field-label">Invite link</label>
+        <input id="room-link" class="link-input" type="text" readonly>
+        <p id="solo-tip" class="hint" hidden>Racing alone? Open the invite link in a second tab to try it out.</p>
+      </div>
       <!-- Not a live region: the per-second countdown would be chatty. Key moments go through #announcer. -->
       <p id="race-status" class="race-status"></p>
       <ul id="race-tracks" class="race-tracks" aria-label="Live progress"></ul>
+      <div id="room-actions" class="room-actions" hidden>
+        <button id="start-btn" class="primary-btn" type="button" aria-describedby="start-hint" hidden>Start race</button>
+        <p id="start-hint" class="hint" hidden></p>
+        <button id="extend-btn" class="secondary-btn" type="button" hidden>Stay in room</button>
+        <button id="leave-room-btn" class="secondary-btn" type="button">Leave room</button>
+      </div>
     </section>
 
     <section id="typing-area" class="typing-area" aria-label="Typing test. Start typing to begin.">

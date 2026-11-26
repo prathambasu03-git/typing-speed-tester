@@ -16,6 +16,10 @@ function createMemoryRoomStore() {
     deleteRoom(id) {
       rooms.delete(id);
     },
+    /** Live rooms; game.js compares it with MAX_ROOMS before creating one. */
+    size() {
+      return rooms.size;
+    },
     clear() {
       rooms.clear();
     },

@@ -53,16 +53,25 @@ function label(value) {
 /* ---------- Well-formed samples (PROTOCOL.md section 5) ---------- */
 
 function player(overrides = {}) {
-  return { id: 'p1', slot: 1, connected: true, ready: true, finished: false, ...overrides };
+  return { id: 'p1', slot: 1, connected: true, ready: true, inRace: false, finished: false, ...overrides };
 }
 
 function roomState(overrides = {}) {
   return {
+    code: 'K7QM2X',
     phase: 'waiting',
     maxPlayers: 2,
+    minPlayers: 2,
+    hostId: 'p1',
+    expiresInMs: 600000,
     players: [player(), player({ id: 'p2', slot: 2 })],
     ...overrides,
   };
+}
+
+/** A snapshot in a phase other than waiting: no lobby timer. */
+function roomInPhase(phase, overrides = {}) {
+  return roomState({ phase, expiresInMs: phase === 'waiting' ? 600000 : null, ...overrides });
 }
 
 function countdown(overrides = {}) {
@@ -105,7 +114,7 @@ function joinAck(overrides = {}) {
 }
 
 function rematchAck(overrides = {}) {
-  return { ok: true, room: roomState({ phase: 'finished' }), ...overrides };
+  return { ok: true, room: roomInPhase('finished'), ...overrides };
 }
 
 /* ------------------------------------------------------------------------ */
@@ -128,9 +137,28 @@ describe('loading multiplayer.js as a browser-style classic script', () => {
   it('defines every exported name as a global for later classic scripts', () => {
     const ctx = load();
     for (const name of Object.keys(mp)) {
-      const expected = name === 'MP_CONSTANTS' ? 'object' : 'function';
-      assert.equal(vm.runInContext(`typeof ${name}`, ctx), expected, name);
+      assert.equal(vm.runInContext(`typeof ${name}`, ctx), typeof mp[name], name);
     }
+  });
+
+  it('exports a function for every name except the constants', () => {
+    const constants = ['MP_CONSTANTS', 'ROOM_CODE_PATTERN', 'ROOM_CODE_FORMAT_MESSAGE', 'SOLO_TIP', 'SIT_OUT_MESSAGE'];
+    for (const [name, value] of Object.entries(mp)) {
+      if (constants.includes(name)) continue;
+      assert.equal(typeof value, 'function', name);
+    }
+  });
+
+  it('defines ROOM_CODE_PATTERN in the vm as a RegExp with the same source', () => {
+    const ctx = load();
+    assert.equal(vm.runInContext('ROOM_CODE_PATTERN instanceof RegExp', ctx), true);
+    assert.equal(vm.runInContext('ROOM_CODE_PATTERN.source', ctx), mp.ROOM_CODE_PATTERN.source);
+  });
+
+  it('defines SOLO_TIP and SIT_OUT_MESSAGE in the vm as the exported strings', () => {
+    const ctx = load();
+    assert.equal(vm.runInContext('SOLO_TIP', ctx), mp.SOLO_TIP);
+    assert.equal(vm.runInContext('SIT_OUT_MESSAGE', ctx), mp.SIT_OUT_MESSAGE);
   });
 
   it('skips the Node export when there is no module (the browser case)', () => {
@@ -383,17 +411,17 @@ describe('validateRoomState', () => {
     assert.deepEqual(out.players.map((p) => p.slot), [1, 2]);
   });
   it('accepts an empty players list', () => {
-    assert.deepEqual(validateRoomState(roomState({ players: [] })).players, []);
+    assert.deepEqual(validateRoomState(roomState({ players: [], hostId: null })).players, []);
   });
   for (const phase of ['waiting', 'countdown', 'racing', 'finished']) {
-    it(`accepts phase ${label(phase)}`, () => assert.equal(validateRoomState(roomState({ phase })).phase, phase));
+    it(`accepts phase ${label(phase)}`, () => assert.equal(validateRoomState(roomInPhase(phase)).phase, phase));
   }
   for (const phase of ['lobby', 'WAITING', '', null, 1]) {
     it(`rejects unknown phase ${label(phase)}`, () => assert.equal(validateRoomState(roomState({ phase })), null));
   }
   for (const maxPlayers of [0, 9, 1.5, '2', NaN, null]) {
     it(`rejects maxPlayers ${label(maxPlayers)}`, () => {
-      assert.equal(validateRoomState(roomState({ maxPlayers, players: [] })), null);
+      assert.equal(validateRoomState(roomState({ maxPlayers, minPlayers: 1, hostId: null, players: [] })), null);
     });
   }
   it('rejects a players field that is not an array', () => {
@@ -401,7 +429,7 @@ describe('validateRoomState', () => {
   });
   it('rejects more players than maxPlayers', () => {
     const players = [player(), player({ id: 'p2', slot: 2 })];
-    assert.equal(validateRoomState(roomState({ maxPlayers: 1, players })), null);
+    assert.equal(validateRoomState(roomState({ maxPlayers: 1, minPlayers: 1, players })), null);
   });
   it('rejects duplicate player ids', () => {
     assert.equal(validateRoomState(roomState({ players: [player(), player({ slot: 2 })] })), null);
@@ -419,9 +447,10 @@ describe('validateRoomState', () => {
     assert.equal(validateRoomState(roomState({ players: [player({ id: 'x'.repeat(65) })] })), null);
   });
   it('accepts a player id of exactly 64 characters', () => {
-    assert.notEqual(validateRoomState(roomState({ players: [player({ id: 'x'.repeat(64) })] })), null);
+    const id = 'x'.repeat(64);
+    assert.notEqual(validateRoomState(roomState({ hostId: id, players: [player({ id })] })), null);
   });
-  for (const field of ['connected', 'ready', 'finished']) {
+  for (const field of ['connected', 'ready', 'inRace', 'finished']) {
     it(`rejects a non-boolean player ${field}`, () => {
       assert.equal(validateRoomState(roomState({ players: [player({ [field]: 'true' })] })), null);
     });
@@ -704,18 +733,27 @@ describe('labelFor', () => {
   const three = [{ id: 'b', slot: 3 }, { id: 'me', slot: 2 }, { id: 'a', slot: 1 }];
 
   it('labels the local player "You"', () => assert.equal(labelFor('me', 'me', two), 'You'));
-  it('labels a single opponent "Opponent"', () => assert.equal(labelFor('a', 'me', two), 'Opponent'));
-  it('numbers the lower-slot opponent "Opponent 1" when there are two', () => {
-    assert.equal(labelFor('a', 'me', three), 'Opponent 1');
+  it('labels the other player in a two-player room by slot, "Player 2"', () => {
+    assert.equal(labelFor('a', 'me', two), 'Player 2');
   });
-  it('numbers the higher-slot opponent "Opponent 2" when there are two', () => {
-    assert.equal(labelFor('b', 'me', three), 'Opponent 2');
+  it('labels the slot 1 player "Player 1" whatever the list order', () => {
+    assert.equal(labelFor('a', 'me', three), 'Player 1');
   });
-  it('falls back to "Opponent" when players is not an array', () => {
-    assert.equal(labelFor('a', 'me', null), 'Opponent');
+  it('labels the slot 3 player "Player 3"', () => assert.equal(labelFor('b', 'me', three), 'Player 3'));
+  it('keeps "Player 3" after lower slots have left', () => {
+    assert.equal(labelFor('b', 'me', [{ id: 'me', slot: 1 }, { id: 'b', slot: 3 }]), 'Player 3');
   });
-  it('falls back to "Opponent" for an unknown id among several opponents', () => {
-    assert.equal(labelFor('zzz', 'me', three), 'Opponent');
+  it('falls back to "Player" when players is not an array', () => {
+    assert.equal(labelFor('a', 'me', null), 'Player');
+  });
+  it('falls back to "Player" for an unknown id', () => {
+    assert.equal(labelFor('zzz', 'me', three), 'Player');
+  });
+  it('falls back to "Player" when the entry has no integer slot', () => {
+    assert.equal(labelFor('a', 'me', [{ id: 'a', slot: '2' }]), 'Player');
+  });
+  it('never uses the word "Opponent"', () => {
+    for (const id of ['a', 'b', 'zzz']) assert.doesNotMatch(labelFor(id, 'me', three), /Opponent/);
   });
 });
 
@@ -770,4 +808,522 @@ describe('formatRaceTime', () => {
   for (const value of [-500, NaN, Infinity, undefined, '41300']) {
     it(`formats ${label(value)} as "0.0s"`, () => assert.equal(formatRaceTime(value), '0.0s'));
   }
+});
+
+/* ======================================================================== */
+/* ---------- Milestone M2: lobby and room codes (PLAN.md 5.4, 9) ---------- */
+/* ======================================================================== */
+
+const {
+  ROOM_CODE_PATTERN,
+  ROOM_CODE_FORMAT_MESSAGE,
+  SOLO_TIP,
+  SIT_OUT_MESSAGE,
+  normalizeRoomCode,
+  isValidRoomCode,
+  roomCodeInputError,
+  parseRoomHash,
+  buildShareLink,
+  spellRoomCode,
+  validateRoomAck,
+  validateStartAck,
+  findSelf,
+  isSittingOut,
+  readyCount,
+  canStartRace,
+  startHint,
+  isAloneInLobby,
+  hostChangeText,
+} = mp;
+
+const HINT_ALONE = 'Waiting for at least one more player.';
+const HINT_NOT_READY = 'Waiting for at least one more player to press Race again.';
+const HINT_RACE_ON = 'A race is on. You can start the next one when it ends.';
+
+/**
+ * A validated-shape room for the rule helpers. Slots follow `ids` order; the
+ * host is 'h' unless given. `ready`/`inRace` list the ids that have the flag
+ * (default: everyone ready, nobody in a race).
+ */
+function lobby({ phase = 'waiting', hostId = 'h', ids = ['h', 'b'], ready = null, inRace = null, minPlayers = 2 } = {}) {
+  const players = ids.map((id, i) => ({
+    id,
+    slot: i + 1,
+    connected: true,
+    ready: ready === null ? true : ready.includes(id),
+    inRace: inRace === null ? false : inRace.includes(id),
+    finished: false,
+  }));
+  return {
+    code: 'K7QM2X', phase, maxPlayers: 4, minPlayers, hostId,
+    expiresInMs: phase === 'waiting' ? 600000 : null, players,
+  };
+}
+
+describe('M2 constants', () => {
+  it('ROOM_CODE_PATTERN is a RegExp', () => assert.ok(ROOM_CODE_PATTERN instanceof RegExp));
+  it('ROOM_CODE_PATTERN is exactly /^[A-HJKMNP-TV-Z2-9]{6}$/', () => {
+    assert.equal(ROOM_CODE_PATTERN.source, '^[A-HJKMNP-TV-Z2-9]{6}$');
+    assert.equal(ROOM_CODE_PATTERN.flags, '');
+  });
+  it('sets roomCodeLength to 6', () => assert.equal(MP_CONSTANTS.roomCodeLength, 6));
+  it('uses the 30-character alphabet with no 0, 1, I, L, O or U', () => {
+    assert.equal(MP_CONSTANTS.roomCodeAlphabet, 'ABCDEFGHJKMNPQRSTVWXYZ23456789');
+    assert.equal(new Set(MP_CONSTANTS.roomCodeAlphabet).size, 30);
+    assert.doesNotMatch(MP_CONSTANTS.roomCodeAlphabet, /[01ILOU]/);
+  });
+  it('agrees with ROOM_CODE_PATTERN for every alphabet character', () => {
+    for (const ch of MP_CONSTANTS.roomCodeAlphabet) {
+      assert.equal(ROOM_CODE_PATTERN.test(ch.repeat(MP_CONSTANTS.roomCodeLength)), true, ch);
+    }
+  });
+  it('makes ROOM_CODE_PATTERN reject every uppercase letter and digit outside the alphabet', () => {
+    for (const ch of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') {
+      if (MP_CONSTANTS.roomCodeAlphabet.includes(ch)) continue;
+      assert.equal(ROOM_CODE_PATTERN.test(ch.repeat(6)), false, ch);
+    }
+  });
+  it('sets lobbyWarningMs to 60000', () => assert.equal(MP_CONSTANTS.lobbyWarningMs, 60000));
+  it('sets lobbyWarningMarginMs to 3000', () => assert.equal(MP_CONSTANTS.lobbyWarningMarginMs, 3000));
+  it('is still frozen with the M2 fields', () => {
+    assert.equal(Object.isFrozen(MP_CONSTANTS), true);
+    assert.throws(() => { MP_CONSTANTS.lobbyWarningMs = 1; }, TypeError);
+    assert.equal(MP_CONSTANTS.lobbyWarningMs, 60000);
+  });
+  it('SOLO_TIP is the exact planned text', () => {
+    assert.equal(SOLO_TIP, 'Racing alone? Open the invite link in a second tab to try it out.');
+  });
+  it('SIT_OUT_MESSAGE is the exact planned text', () => {
+    assert.equal(SIT_OUT_MESSAGE, "The host started a new race. You'll join the next one.");
+  });
+  it('ROOM_CODE_FORMAT_MESSAGE is the exact planned text', () => {
+    assert.equal(ROOM_CODE_FORMAT_MESSAGE,
+      'Room codes have 6 letters and numbers, like K7QM2X. They never use 0, 1, I, L, O or U.');
+  });
+  it('uses a valid example code in ROOM_CODE_FORMAT_MESSAGE', () => {
+    assert.equal(isValidRoomCode(ROOM_CODE_FORMAT_MESSAGE.match(/like (\w+)\./)[1]), true);
+  });
+});
+
+describe('normalizeRoomCode', () => {
+  const rows = [
+    [' k7q-m2x ', 'K7QM2X'],
+    ['K7 QM 2X', 'K7QM2X'],
+    ['k7qm2x', 'K7QM2X'],
+    ['K7QM2X', 'K7QM2X'],
+    ['\tk7\nqm-2x\u00A0', 'K7QM2X'],
+    ['--k-7-q--', 'K7Q'],
+    ['', ''],
+    ['   ', ''],
+    ['k7qm0x', 'K7QM0X'],
+  ];
+  for (const [input, expected] of rows) {
+    it(`turns ${label(input)} into ${label(expected)}`, () => assert.equal(normalizeRoomCode(input), expected));
+  }
+  for (const value of [null, undefined, 5, {}, ['K7QM2X']]) {
+    it(`returns '' for the non-string ${label(value)}`, () => assert.equal(normalizeRoomCode(value), ''));
+  }
+});
+
+describe('isValidRoomCode', () => {
+  it("accepts 'K7QM2X'", () => assert.equal(isValidRoomCode('K7QM2X'), true));
+  it("accepts 'AAAAAA' and '999999'", () => {
+    assert.equal(isValidRoomCode('AAAAAA'), true);
+    assert.equal(isValidRoomCode('999999'), true);
+  });
+  for (const value of ['k7qm2x', 'K7QM2', 'K7QM2XX', 'K7QM0X', 'K7QMOX', 'K7QM1X', 'K7QMIX', 'K7QMLX',
+    'K7QMUX', 'K7Q-M2', 'K7QM2 ', ' K7QM2', '', null, undefined, 123456, ['K7QM2X']]) {
+    it(`rejects ${label(value)}`, () => assert.equal(isValidRoomCode(value), false));
+  }
+});
+
+describe('roomCodeInputError', () => {
+  it("asks for a code when the input is ''", () => assert.equal(roomCodeInputError(''), 'Enter a room code.'));
+  it('asks for a code when the input is only spaces', () => assert.equal(roomCodeInputError('  '), 'Enter a room code.'));
+  it('asks for a code when the input is only hyphens', () => assert.equal(roomCodeInputError('--'), 'Enter a room code.'));
+  it('asks for a code for a non-string input', () => assert.equal(roomCodeInputError(null), 'Enter a room code.'));
+  it("gives the format message for the short 'k7qm2'", () => {
+    assert.equal(roomCodeInputError('k7qm2'), ROOM_CODE_FORMAT_MESSAGE);
+  });
+  it("gives the format message for 'K7QM0X', which uses a 0", () => {
+    assert.equal(roomCodeInputError('K7QM0X'), ROOM_CODE_FORMAT_MESSAGE);
+  });
+  it("gives the format message for 'k7q'", () => assert.equal(roomCodeInputError('k7q'), ROOM_CODE_FORMAT_MESSAGE));
+  it("gives '' for 'k7q-m2x', which normalises to a valid code", () => {
+    assert.equal(roomCodeInputError('k7q-m2x'), '');
+  });
+  it("gives '' for a valid canonical code", () => assert.equal(roomCodeInputError('K7QM2X'), ''));
+});
+
+describe('parseRoomHash', () => {
+  const valid = [
+    ['#room=k7qm2x', 'K7QM2X'],
+    ['#room=K7QM2X', 'K7QM2X'],
+    ['#room=K7Q-M2X', 'K7QM2X'],
+    ['#room=K7Q M2X', 'K7QM2X'],
+  ];
+  for (const [hash, expected] of valid) {
+    it(`reads ${label(hash)} as ${label(expected)}`, () => assert.equal(parseRoomHash(hash), expected));
+  }
+  for (const hash of ['', '#', '#room=', '#room=K7QM2', '#room=K7QM2X&x=1', '#ROOM=K7QM2X', '#room=<b>',
+    '#room=K7QM0X', 'room=K7QM2X', '#room=K7QM2X#', `#room=${'A'.repeat(17)}`, '#xroom=K7QM2X',
+    '#room=K7QM2X\n']) {
+    it(`returns null for ${label(hash)}`, () => assert.equal(parseRoomHash(hash), null));
+  }
+  for (const value of [null, undefined, 42, {}]) {
+    it(`returns null for the non-string ${label(value)}`, () => assert.equal(parseRoomHash(value), null));
+  }
+});
+
+describe('buildShareLink', () => {
+  const PAGES = 'https://prathambasu03-git.github.io/typing-speed-tester/';
+  it('adds #room=CODE to the Pages URL', () => {
+    assert.equal(buildShareLink(PAGES, 'K7QM2X'), `${PAGES}#room=K7QM2X`);
+  });
+  it('replaces an old #room= hash', () => {
+    assert.equal(buildShareLink(`${PAGES}#room=AAAAAA`, 'K7QM2X'), `${PAGES}#room=K7QM2X`);
+  });
+  it('replaces any other old hash', () => {
+    assert.equal(buildShareLink(`${PAGES}#top`, 'K7QM2X'), `${PAGES}#room=K7QM2X`);
+  });
+  it('keeps the path and query of a localhost page', () => {
+    assert.equal(buildShareLink('http://localhost:8080/index.html?x=1', 'K7QM2X'),
+      'http://localhost:8080/index.html?x=1#room=K7QM2X');
+  });
+  it('returns null for a file: page', () => assert.equal(buildShareLink('file:///C:/index.html', 'K7QM2X'), null));
+  it("returns null for 'not a url'", () => assert.equal(buildShareLink('not a url', 'K7QM2X'), null));
+  for (const code of ['k7qm2x', 'K7QM0X', '', null, 'K7QM2X&x=1']) {
+    it(`returns null for the invalid code ${label(code)}`, () => assert.equal(buildShareLink(PAGES, code), null));
+  }
+  it('round-trips through parseRoomHash', () => {
+    const link = buildShareLink(PAGES, 'K7QM2X');
+    assert.equal(parseRoomHash(new URL(link).hash), 'K7QM2X');
+  });
+});
+
+describe('spellRoomCode', () => {
+  it("spells 'K7QM2X' as 'K 7 Q M 2 X'", () => assert.equal(spellRoomCode('K7QM2X'), 'K 7 Q M 2 X'));
+  it("gives '' for ''", () => assert.equal(spellRoomCode(''), ''));
+  for (const value of [null, undefined, 42]) {
+    it(`gives '' for the non-string ${label(value)}`, () => assert.equal(spellRoomCode(value), ''));
+  }
+});
+
+describe('findSelf', () => {
+  it('returns the player with the given id', () => {
+    const room = lobby();
+    assert.equal(findSelf(room, 'b'), room.players[1]);
+  });
+  it('returns null for an id not in the room', () => assert.equal(findSelf(lobby(), 'zzz'), null));
+  it('returns null for a null room', () => assert.equal(findSelf(null, 'h'), null));
+  it('returns null for a room without a players array', () => assert.equal(findSelf({ players: 'x' }, 'h'), null));
+});
+
+describe('isSittingOut', () => {
+  it('is true in countdown when self has inRace false', () => {
+    assert.equal(isSittingOut(lobby({ phase: 'countdown', ids: ['h', 'b', 'c'], inRace: ['h', 'b'] }), 'c'), true);
+  });
+  it('is true in racing when self has inRace false', () => {
+    assert.equal(isSittingOut(lobby({ phase: 'racing', ids: ['h', 'b', 'c'], inRace: ['h', 'b'] }), 'c'), true);
+  });
+  it('is false in countdown when self has inRace true', () => {
+    assert.equal(isSittingOut(lobby({ phase: 'countdown', ids: ['h', 'b', 'c'], inRace: ['h', 'b'] }), 'b'), false);
+  });
+  it('is false in finished, even with inRace false', () => {
+    assert.equal(isSittingOut(lobby({ phase: 'finished', ids: ['h', 'b', 'c'] }), 'c'), false);
+  });
+  it('is false in waiting', () => assert.equal(isSittingOut(lobby(), 'b'), false));
+  it('is false when self is not in the room', () => {
+    assert.equal(isSittingOut(lobby({ phase: 'racing', inRace: ['h', 'b'] }), 'zzz'), false);
+  });
+  it('is false for a null room', () => assert.equal(isSittingOut(null, 'b'), false));
+});
+
+describe('readyCount', () => {
+  it('counts every ready player', () => assert.equal(readyCount(lobby({ ids: ['h', 'b', 'c'] }), 'h'), 3));
+  it('adds self when self is not ready (the host Start counts as Race again)', () => {
+    assert.equal(readyCount(lobby({ phase: 'finished', ids: ['h', 'b', 'c'], ready: ['b'] }), 'h'), 2);
+  });
+  it('does not add self twice when self is ready', () => {
+    assert.equal(readyCount(lobby({ phase: 'finished', ids: ['h', 'b', 'c'], ready: ['h'] }), 'h'), 1);
+  });
+  it('does not add an id that is not in the room', () => {
+    assert.equal(readyCount(lobby({ phase: 'finished', ids: ['h', 'b'], ready: ['b'] }), 'zzz'), 1);
+  });
+});
+
+describe('canStartRace', () => {
+  it('is true for the host with 2 players in waiting', () => assert.equal(canStartRace(lobby(), 'h'), true));
+  it('is false for a non-host with 2 players in waiting', () => assert.equal(canStartRace(lobby(), 'b'), false));
+  it('is false for the host alone', () => assert.equal(canStartRace(lobby({ ids: ['h'] }), 'h'), false));
+  for (const phase of ['countdown', 'racing']) {
+    it(`is false in ${phase}`, () => {
+      assert.equal(canStartRace(lobby({ phase, inRace: ['h', 'b'] }), 'h'), false);
+    });
+  }
+  it('is true in finished with 3 players when the host and B are ready', () => {
+    assert.equal(canStartRace(lobby({ phase: 'finished', ids: ['h', 'b', 'c'], ready: ['h', 'b'] }), 'h'), true);
+  });
+  it('is true in finished when the host is not ready but B is', () => {
+    assert.equal(canStartRace(lobby({ phase: 'finished', ids: ['h', 'b', 'c'], ready: ['b'] }), 'h'), true);
+  });
+  it('is false in finished when only the host is ready', () => {
+    assert.equal(canStartRace(lobby({ phase: 'finished', ids: ['h', 'b', 'c'], ready: ['h'] }), 'h'), false);
+  });
+  it('is false for a null room', () => assert.equal(canStartRace(null, 'h'), false));
+  it('respects minPlayers 3', () => {
+    assert.equal(canStartRace(lobby({ minPlayers: 3 }), 'h'), false);
+    assert.equal(canStartRace(lobby({ minPlayers: 3, ids: ['h', 'b', 'c'] }), 'h'), true);
+  });
+});
+
+describe('startHint', () => {
+  it('tells the host alone in waiting to wait for one more player', () => {
+    assert.equal(startHint(lobby({ ids: ['h'] }), 'h'), HINT_ALONE);
+  });
+  it('tells the host in finished with only the host ready to wait for Race again', () => {
+    assert.equal(startHint(lobby({ phase: 'finished', ids: ['h', 'b', 'c'], ready: ['h'] }), 'h'), HINT_NOT_READY);
+  });
+  it('tells the host alone in finished to wait for one more player', () => {
+    assert.equal(startHint(lobby({ phase: 'finished', ids: ['h'], ready: [] }), 'h'), HINT_ALONE);
+  });
+  it('tells the host during racing that a race is on', () => {
+    assert.equal(startHint(lobby({ phase: 'racing', inRace: ['h', 'b'] }), 'h'), HINT_RACE_ON);
+  });
+  it('tells the host during countdown that a race is on', () => {
+    assert.equal(startHint(lobby({ phase: 'countdown', inRace: ['h', 'b'] }), 'h'), HINT_RACE_ON);
+  });
+  it("gives '' when the host can start", () => assert.equal(startHint(lobby(), 'h'), ''));
+  it("gives '' to a non-host, even when the room cannot start", () => {
+    assert.equal(startHint(lobby({ phase: 'finished', ids: ['h', 'b', 'c'], ready: ['h'] }), 'b'), '');
+  });
+  it("gives '' for a null room", () => assert.equal(startHint(null, 'h'), ''));
+});
+
+describe('isAloneInLobby', () => {
+  it('is true in waiting with 1 player', () => assert.equal(isAloneInLobby(lobby({ ids: ['h'] })), true));
+  it('is false in waiting with 2 players', () => assert.equal(isAloneInLobby(lobby()), false));
+  it('is false in finished with 1 player', () => {
+    assert.equal(isAloneInLobby(lobby({ phase: 'finished', ids: ['h'] })), false);
+  });
+  it('is false for a null room', () => assert.equal(isAloneInLobby(null), false));
+});
+
+describe('hostChangeText', () => {
+  // The old host 'a' left; 'me' (slot 2) or 'c' (slot 3) takes over.
+  const prev = lobby({ hostId: 'a', ids: ['a', 'me', 'c'] });
+
+  it("gives '' when prev is null", () => {
+    assert.equal(hostChangeText(null, lobby({ hostId: 'me', ids: ['me', 'c'] }), 'me', 'waiting'), '');
+  });
+  it("gives '' when the host is the same", () => assert.equal(hostChangeText(prev, prev, 'me', 'waiting'), ''));
+  it("gives '' when the new hostId is null", () => {
+    assert.equal(hostChangeText(prev, lobby({ hostId: null, ids: [] }), 'me', 'waiting'), '');
+  });
+  it('tells a new host in client waiting with 2 players that they can start', () => {
+    assert.equal(hostChangeText(prev, lobby({ hostId: 'me', ids: ['me', 'c'] }), 'me', 'waiting'),
+      'You are now the host. You can start the race.');
+  });
+  it('tells a new host alone in client waiting to wait for one more player', () => {
+    assert.equal(hostChangeText(prev, lobby({ hostId: 'me', ids: ['me'] }), 'me', 'waiting'),
+      'You are now the host. Waiting for at least one more player.');
+  });
+  it('tells a new host in client waiting with too few ready to wait for Race again', () => {
+    const room = lobby({ phase: 'finished', hostId: 'me', ids: ['me', 'c', 'd'], ready: ['me'] });
+    assert.equal(hostChangeText(prev, room, 'me', 'waiting'),
+      'You are now the host. Waiting for at least one more player to press Race again.');
+  });
+  it('tells a new host in client finished to press Race again, then Start race', () => {
+    const room = lobby({ phase: 'finished', hostId: 'me', ids: ['me', 'c'], ready: [] });
+    assert.equal(hostChangeText(prev, room, 'me', 'finished'), 'You are now the host. Press Race again, then Start race.');
+  });
+  it('tells a new host in client running only that they are the host', () => {
+    const room = lobby({ phase: 'racing', hostId: 'me', ids: ['me', 'c'], inRace: ['me', 'c'] });
+    assert.equal(hostChangeText(prev, room, 'me', 'running'), 'You are now the host.');
+  });
+  it('tells a new host in client countdown only that they are the host', () => {
+    const room = lobby({ phase: 'countdown', hostId: 'me', ids: ['me', 'c'], inRace: ['me', 'c'] });
+    assert.equal(hostChangeText(prev, room, 'me', 'countdown'), 'You are now the host.');
+  });
+  it('tells a sitting-out new host they can start the next race when this one ends', () => {
+    const room = lobby({ phase: 'racing', hostId: 'me', ids: ['me', 'c', 'd'], inRace: ['c', 'd'] });
+    assert.equal(hostChangeText(prev, room, 'me', 'waiting'),
+      'You are now the host. You can start the next race when this one ends.');
+  });
+  for (const clientPhase of ['waiting', 'finished']) {
+    it(`tells others in client ${clientPhase} that "Player 3 is now the host."`, () => {
+      const room = lobby({ hostId: 'c', ids: ['x', 'me', 'c'] }); // c is slot 3
+      assert.equal(hostChangeText(prev, room, 'me', clientPhase), 'Player 3 is now the host.');
+    });
+  }
+  for (const clientPhase of ['running', 'countdown']) {
+    it(`says nothing to others in client ${clientPhase}`, () => {
+      const room = lobby({ phase: 'racing', hostId: 'c', ids: ['x', 'me', 'c'], inRace: ['x', 'me', 'c'] });
+      assert.equal(hostChangeText(prev, room, 'me', clientPhase), '');
+    });
+  }
+});
+
+describe('validateRoomState (M2 fields)', () => {
+  it('accepts a full M2 snapshot and returns every field', () => {
+    const input = roomState({ maxPlayers: 4, players: [player(), player({ id: 'p2', slot: 3 })] });
+    assert.deepEqual(validateRoomState(input), input);
+  });
+  it('accepts expiresInMs null in waiting', () => {
+    assert.equal(validateRoomState(roomState({ expiresInMs: null })).expiresInMs, null);
+  });
+  it('accepts expiresInMs 0 and 3600000', () => {
+    assert.notEqual(validateRoomState(roomState({ expiresInMs: 0 })), null);
+    assert.notEqual(validateRoomState(roomState({ expiresInMs: 3600000 })), null);
+  });
+  it('accepts inRace true in racing', () => {
+    const out = validateRoomState(roomInPhase('racing', { players: [player({ inRace: true }), player({ id: 'p2', slot: 2 })] }));
+    assert.equal(out.players[0].inRace, true);
+  });
+  it('accepts hostId null with no players', () => {
+    assert.notEqual(validateRoomState(roomState({ hostId: null, players: [] })), null);
+  });
+  it('accepts minPlayers equal to maxPlayers', () => {
+    assert.notEqual(validateRoomState(roomState({ minPlayers: 2, maxPlayers: 2 })), null);
+  });
+  it('rejects a missing code', () => {
+    const input = roomState();
+    delete input.code;
+    assert.equal(validateRoomState(input), null);
+  });
+  for (const code of ['k7qm2x', 'K7QM0X', 'K7QM2', '', null, 123456, '<b>xx</b>']) {
+    it(`rejects the bad code ${label(code)}`, () => assert.equal(validateRoomState(roomState({ code })), null));
+  }
+  it('rejects a hostId that is not among the players', () => {
+    assert.equal(validateRoomState(roomState({ hostId: 'p9' })), null);
+  });
+  it('rejects hostId null while there are players', () => {
+    assert.equal(validateRoomState(roomState({ hostId: null })), null);
+  });
+  it('rejects a missing hostId', () => {
+    const input = roomState();
+    delete input.hostId;
+    assert.equal(validateRoomState(input), null);
+  });
+  it('rejects minPlayers above maxPlayers', () => {
+    assert.equal(validateRoomState(roomState({ minPlayers: 3, maxPlayers: 2 })), null);
+  });
+  for (const minPlayers of [0, 1.5, '2', null, undefined]) {
+    it(`rejects minPlayers ${label(minPlayers)}`, () => {
+      assert.equal(validateRoomState(roomState({ minPlayers })), null);
+    });
+  }
+  for (const expiresInMs of [-1, 3600001, 1.5, '600000', NaN, Infinity, undefined]) {
+    it(`rejects expiresInMs ${label(expiresInMs)}`, () => {
+      assert.equal(validateRoomState(roomState({ expiresInMs })), null);
+    });
+  }
+  for (const phase of ['countdown', 'racing', 'finished']) {
+    it(`rejects a non-null expiresInMs in ${phase}`, () => {
+      assert.equal(validateRoomState(roomState({ phase, expiresInMs: 600000 })), null);
+    });
+  }
+  it('rejects a player without inRace', () => {
+    const p = player();
+    delete p.inRace;
+    assert.equal(validateRoomState(roomState({ players: [p] })), null);
+  });
+  it('rejects a player with inRace true while the room is waiting', () => {
+    assert.equal(validateRoomState(roomState({ players: [player(), player({ id: 'p2', slot: 2, inRace: true })] })), null);
+  });
+});
+
+describe('validateJoinAck (create and join)', () => {
+  it('accepts a room:create success ack: one player who is host, with a lobby timer', () => {
+    const ack = { ok: true, playerId: 'p1', room: roomState({ maxPlayers: 4, players: [player()] }) };
+    assert.deepEqual(validateJoinAck(ack), ack);
+  });
+  it('accepts a room:join success ack into a finished room (joiner ready, not in race)', () => {
+    const room = roomInPhase('finished', {
+      maxPlayers: 4,
+      players: [player({ ready: false }), player({ id: 'p2', slot: 2, ready: false }), player({ id: 'p3', slot: 3 })],
+    });
+    const ack = { ok: true, playerId: 'p3', room };
+    assert.deepEqual(validateJoinAck(ack), ack);
+  });
+  for (const code of ['BAD_CODE', 'ROOM_NOT_FOUND', 'ROOM_FULL', 'RACE_IN_PROGRESS', 'TOO_MANY_ROOMS']) {
+    it(`reduces a ${code} failure to its code`, () => {
+      assert.deepEqual(validateJoinAck({ ok: false, error: { code, message: 'x' } }), { ok: false, error: { code } });
+    });
+  }
+  it('rejects a success ack whose room has a bad code', () => {
+    assert.equal(validateJoinAck(joinAck({ room: roomState({ code: 'bad' }) })), null);
+  });
+  it('rejects a success ack whose room lacks M2 fields', () => {
+    const room = roomState();
+    delete room.minPlayers;
+    assert.equal(validateJoinAck(joinAck({ room })), null);
+  });
+  it('rejects a playerId over 64 characters', () => {
+    assert.equal(validateJoinAck(joinAck({ playerId: 'x'.repeat(65) })), null);
+  });
+});
+
+describe('validateRoomAck', () => {
+  const roomAck = (overrides = {}) => ({ ok: true, room: roomState(), ...overrides });
+  commonValidatorChecks(validateRoomAck, roomAck);
+
+  it('is the same function as validateRematchAck', () => assert.equal(validateRematchAck, validateRoomAck));
+  it('reduces a NOT_WAITING failure to its code', () => {
+    assert.deepEqual(validateRoomAck({ ok: false, error: { code: 'NOT_WAITING', message: 'x' } }),
+      { ok: false, error: { code: 'NOT_WAITING' } });
+  });
+  it('rejects a success ack with no room', () => assert.equal(validateRoomAck({ ok: true }), null));
+  it('rejects a success ack with an invalid room', () => {
+    assert.equal(validateRoomAck(roomAck({ room: roomState({ hostId: 'nobody' }) })), null);
+  });
+  it('rejects a failure ack with no error object', () => assert.equal(validateRoomAck({ ok: false }), null));
+  it('rejects a non-boolean ok', () => assert.equal(validateRoomAck(roomAck({ ok: 'yes' })), null));
+  it('copies the nested room', () => {
+    const input = roomAck();
+    assert.notStrictEqual(validateRoomAck(input).room, input.room);
+  });
+});
+
+describe('validateStartAck', () => {
+  commonValidatorChecks(validateStartAck, () => ({ ok: true }));
+
+  it('drops a room from a success ack', () => {
+    assert.deepEqual(validateStartAck({ ok: true, room: roomState() }), { ok: true });
+  });
+  for (const code of ['NOT_HOST', 'NOT_ENOUGH_PLAYERS', 'PLAYERS_NOT_READY', 'RACE_IN_PROGRESS']) {
+    it(`reduces a ${code} failure to its code`, () => {
+      assert.deepEqual(validateStartAck({ ok: false, error: { code, message: 'm' } }), { ok: false, error: { code } });
+    });
+  }
+  it('rejects a failure ack with no error object', () => assert.equal(validateStartAck({ ok: false }), null));
+  it('rejects a failure ack with a non-string code', () => {
+    assert.equal(validateStartAck({ ok: false, error: { code: 1 } }), null);
+  });
+  it('rejects a non-boolean ok', () => assert.equal(validateStartAck({ ok: 1 }), null));
+});
+
+describe('errorMessage (M2 codes)', () => {
+  const fallback = errorMessage('NO_SUCH_CODE');
+  const expected = {
+    BAD_CODE: ROOM_CODE_FORMAT_MESSAGE,
+    ROOM_NOT_FOUND: 'No room has that code. Check it, or ask for a new link: rooms close when everyone leaves.',
+    ROOM_FULL: 'That room is full (4 players). Ask the host for a new room or try another code.',
+    RACE_IN_PROGRESS: 'That room is in a race right now. Try again when it ends.',
+    TOO_MANY_ROOMS: 'The game server is busy. Try again in a few minutes.',
+    NOT_HOST: 'Only the host can start the race.',
+    NOT_ENOUGH_PLAYERS: 'You need at least 2 players to start.',
+    PLAYERS_NOT_READY: 'At least one more player needs to press Race again before you can start.',
+    NOT_WAITING: 'The room is not waiting for a race.',
+    ROOM_EXPIRED: 'The room closed because no race started for 10 minutes. You are playing solo.',
+  };
+  for (const [code, text] of Object.entries(expected)) {
+    it(`gives ${code} the planned text`, () => assert.equal(errorMessage(code), text));
+  }
+  it('gives every M2 code its own text, distinct from the default and from each other', () => {
+    const texts = Object.keys(expected).map(errorMessage);
+    assert.ok(!texts.includes(fallback));
+    assert.equal(new Set(texts).size, texts.length);
+  });
+  it('tells the player they are solo after ROOM_EXPIRED', () => assert.match(errorMessage('ROOM_EXPIRED'), /solo/i));
 });

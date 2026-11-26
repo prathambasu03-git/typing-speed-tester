@@ -2,21 +2,16 @@
 
 /* Socket integration: edge cases. Full room, double join, leaving during the
    countdown, disconnects mid-race, late and duplicate events, client-sent
-   scores, bad payloads, rate limiting, simultaneous finishes, handler errors. */
+   scores, bad payloads, rate limiting, simultaneous finishes, handler errors.
+   The room-full tests use maxPlayers 2 so they stay small; the default
+   capacity of 4 is covered in lobby.flow.test.js. */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { setup, sleep, FIXED_PASSAGE } = require('./helpers');
+const { setup, sleep, eventually, FIXED_PASSAGE } = require('./helpers');
 const { createMemoryRoomStore } = require('../src/roomStore');
 
-/** Polls `check` until it returns true, or fails after `timeoutMs`. */
-async function eventually(check, message, timeoutMs = 1000) {
-  const deadline = performance.now() + timeoutMs;
-  while (!check()) {
-    if (performance.now() > deadline) throw new Error(`Timed out: ${message}`);
-    await sleep(5);
-  }
-}
+const TWO_SEATS = Object.freeze({ maxPlayers: 2 });
 
 /** The latest race:update entry for `playerId` seen by `client`. */
 function latestEntry(client, playerId) {
@@ -27,40 +22,39 @@ function latestEntry(client, playerId) {
 
 /* ---------- Joining ---------- */
 
-test('a third client is refused with ROOM_FULL', async (t) => {
-  const ctx = await setup(t);
-  await ctx.joined();
-  await ctx.joined();
+test('a third client in a two-seat room is refused with ROOM_FULL', async (t) => {
+  const ctx = await setup(t, TWO_SEATS);
+  await ctx.lobby(2);
   const c = await ctx.client();
-  const ack = await c.join();
+  const ack = await c.join(ctx.code);
   assert.equal(ack.ok, false);
   assert.equal(ack.error.code, 'ROOM_FULL');
   assert.equal(typeof ack.error.message, 'string');
 });
 
 test('a refused third client receives no room broadcasts', async (t) => {
-  const ctx = await setup(t);
-  const a = await ctx.joined();
-  const b = await ctx.joined();
+  const ctx = await setup(t, TWO_SEATS);
+  const [a, b] = await ctx.lobby(2);
   const c = await ctx.client();
-  await c.join();
+  await c.join(ctx.code);
+  await ctx.start();
   await Promise.all([a.waitFor('race:start'), b.waitFor('race:start')]);
   a.progress(1, 'ab');
   await b.waitFor('race:update');
   assert.deepEqual(c.events.map((e) => e.name), []);
 });
 
-test('a refused third client is still refused while the race runs', async (t) => {
-  const ctx = await setup(t);
+test('a full two-seat room still answers ROOM_FULL while the race runs', async (t) => {
+  const ctx = await setup(t, TWO_SEATS);
   await ctx.racing();
   const c = await ctx.client();
-  assert.equal((await c.join()).error.code, 'ROOM_FULL');
+  assert.equal((await c.join(ctx.code)).error.code, 'ROOM_FULL');
 });
 
-test('the same socket joining twice is refused with ALREADY_JOINED and takes one slot', async (t) => {
+test('the same socket joining its own room again is refused with ALREADY_JOINED and takes one slot', async (t) => {
   const ctx = await setup(t);
   const a = await ctx.joined();
-  const again = await a.join();
+  const again = await a.join(ctx.code);
   assert.equal(again.ok, false);
   assert.equal(again.error.code, 'ALREADY_JOINED');
   const b = await ctx.joined();
@@ -69,6 +63,7 @@ test('the same socket joining twice is refused with ALREADY_JOINED and takes one
 
 test('room:join with a payload that is not an object gets BAD_PAYLOAD', async (t) => {
   const ctx = await setup(t);
+  await ctx.created();
   for (const payload of [null, 'x', 1, [], true]) {
     const c = await ctx.client();
     const ack = await c.emitAck('room:join', payload);
@@ -79,57 +74,90 @@ test('room:join with a payload that is not an object gets BAD_PAYLOAD', async (t
   }
   // None of them joined the room.
   const d = await ctx.joined();
-  assert.equal(d.joinAck.room.players.length, 1);
+  assert.equal(d.joinAck.room.players.length, 2);
 });
 
-test('room:join with no payload but an ack joins the room', async (t) => {
+test('room:join with no payload but an ack gets BAD_PAYLOAD because the code is missing', async (t) => {
   const ctx = await setup(t);
   const a = await ctx.client();
   const ack = await a.emitAck('room:join');
+  assert.equal(ack.ok, false);
+  assert.equal(ack.error.code, 'BAD_PAYLOAD');
+  assert.equal(await a.disconnected, 'io server disconnect');
+});
+
+test('room:create with no payload but an ack creates a room', async (t) => {
+  const ctx = await setup(t);
+  const a = await ctx.client();
+  const ack = await a.emitAck('room:create');
   assert.equal(ack.ok, true);
+  assert.equal(ack.room.hostId, ack.playerId);
 });
 
 test('room:join without an ack gets game:error BAD_PAYLOAD and does not join', async (t) => {
   const ctx = await setup(t);
+  await ctx.created();
   const a = await ctx.client();
-  a.socket.emit('room:join', {});
+  a.socket.emit('room:join', { code: ctx.code });
   const error = await a.waitFor('game:error');
   assert.equal(error.payload.code, 'BAD_PAYLOAD');
   assert.equal(typeof error.payload.message, 'string');
   const b = await ctx.joined();
-  assert.equal(b.joinAck.room.players.length, 1);
+  assert.equal(b.joinAck.room.players.length, 2);
+});
+
+test('room:create without an ack gets game:error BAD_PAYLOAD and creates nothing', async (t) => {
+  const store = createMemoryRoomStore();
+  const ctx = await setup(t, { store });
+  const a = await ctx.client();
+  a.socket.emit('room:create', {});
+  const error = await a.waitFor('game:error');
+  assert.equal(error.payload.code, 'BAD_PAYLOAD');
+  assert.equal(store.size(), 0);
+  assert.equal(a.socket.connected, true);
 });
 
 test('the join ack snapshot never exposes socket ids', async (t) => {
   const ctx = await setup(t);
+  await ctx.created();
   const a = await ctx.joined();
   const text = JSON.stringify(a.joinAck);
   assert.ok(!text.includes(a.socket.id));
-  assert.deepEqual(Object.keys(a.joinAck.room.players[0]).sort(), ['connected', 'finished', 'id', 'ready', 'slot']);
+  assert.ok(!text.includes(ctx.host.socket.id));
+  assert.deepEqual(Object.keys(a.joinAck.room.players[0]).sort(), [
+    'connected',
+    'finished',
+    'id',
+    'inRace',
+    'ready',
+    'slot',
+  ]);
 });
 
 /* ---------- Leaving ---------- */
 
 test('a player leaving during the countdown returns the room to waiting and no race starts', async (t) => {
   const ctx = await setup(t, { countdownMs: 200 });
-  const a = await ctx.joined();
-  const b = await ctx.joined();
+  const [a, b] = await ctx.lobby(2);
+  await ctx.start();
   await a.waitFor('race:countdown');
   await b.close();
   const state = await a.waitFor('room:state', (s) => s.phase === 'waiting' && s.players.length === 1);
-  assert.deepEqual(state.payload.players.map((p) => [p.id, p.ready]), [[a.playerId, true]]);
+  assert.deepEqual(state.payload.players.map((p) => [p.id, p.ready, p.inRace]), [[a.playerId, true, false]]);
+  assert.ok(state.payload.expiresInMs > 0, 'the lobby timer restarts');
   await sleep(300);
   assert.equal(a.pending('race:start').length, 0);
 });
 
-test('a new player after a cancelled countdown starts a fresh countdown', async (t) => {
+test('after a cancelled countdown a new player joins and the host starts a fresh countdown', async (t) => {
   const ctx = await setup(t, { countdownMs: 100 });
-  const a = await ctx.joined();
-  const b = await ctx.joined();
+  const [a, b] = await ctx.lobby(2);
+  await ctx.start();
   await a.waitFor('race:countdown');
   await b.close();
   await a.waitFor('room:state', (s) => s.phase === 'waiting' && s.players.length === 1);
   const c = await ctx.joined();
+  await ctx.start();
   await a.waitFor('race:countdown');
   await c.waitFor('race:start');
   await a.waitFor('race:start');
@@ -139,9 +167,10 @@ test('the only player leaving a waiting room deletes the room', async (t) => {
   const store = createMemoryRoomStore();
   const ctx = await setup(t, { store });
   const a = await ctx.joined();
-  assert.ok(store.getRoom('main'));
+  assert.ok(store.getRoom(ctx.code));
   await a.close();
-  await eventually(() => store.getRoom('main') === null, 'room deleted');
+  await eventually(() => store.getRoom(ctx.code) === null, 'room deleted');
+  assert.equal(store.size(), 0);
 });
 
 test('a player who finished sees the race end when the opponent disconnects', async (t) => {
@@ -185,15 +214,22 @@ test('a disconnect mid-race marks the player disconnected and the race goes on',
   assert.deepEqual(end.payload.results.map((r) => r.status), ['finished', 'left']);
 });
 
-test('both players disconnecting mid-race clears the room so a new client gets a fresh waiting room', async (t) => {
+test('both players disconnecting mid-race deletes the room and its timers, even if the code is reissued', async (t) => {
   const store = createMemoryRoomStore();
-  const ctx = await setup(t, { store, raceTimeLimitMs: 300 });
+  // randomInt always 0: every room gets the code AAAAAA, so the new room
+  // reuses the old room's key and would catch any timer left behind.
+  const ctx = await setup(t, { store, raceTimeLimitMs: 300, randomInt: () => 0 });
   const [a, b] = await ctx.racing();
+  assert.equal(ctx.code, 'AAAAAA');
   await a.close();
   await b.close();
-  await eventually(() => store.getRoom('main') === null, 'room deleted');
+  await eventually(() => store.getRoom('AAAAAA') === null, 'room deleted');
 
-  const c = await ctx.joined();
+  const late = await ctx.client();
+  assert.equal((await late.join('AAAAAA')).error.code, 'ROOM_NOT_FOUND');
+
+  const c = await ctx.created();
+  assert.equal(c.joinAck.room.code, 'AAAAAA');
   assert.equal(c.joinAck.room.phase, 'waiting');
   assert.deepEqual(c.joinAck.room.players.map((p) => p.slot), [1]);
   // The old race-limit timer must not fire into the new room.
@@ -202,15 +238,15 @@ test('both players disconnecting mid-race clears the room so a new client gets a
     c.events.map((e) => e.name),
     ['room:state']
   );
-  assert.equal(store.getRoom('main').phase, 'waiting');
+  assert.equal(store.getRoom('AAAAAA').phase, 'waiting');
 });
 
 /* ---------- Late, early and duplicate events ---------- */
 
 test('progress sent during the countdown is ignored', async (t) => {
   const ctx = await setup(t, { countdownMs: 150 });
-  const a = await ctx.joined();
-  const b = await ctx.joined();
+  const [a, b] = await ctx.lobby(2);
+  await ctx.start();
   await a.waitFor('race:countdown');
   a.progress(1, 'ab');
   await a.waitFor('race:start');
@@ -287,8 +323,8 @@ test('a rematch while racing gets NOT_FINISHED', async (t) => {
 
 test('a rematch during the countdown gets NOT_FINISHED', async (t) => {
   const ctx = await setup(t, { countdownMs: 300 });
-  const a = await ctx.joined();
-  await ctx.joined();
+  const [a] = await ctx.lobby(2);
+  await ctx.start();
   await a.waitFor('race:countdown');
   const ack = await a.rematch();
   assert.equal(ack.error.code, 'NOT_FINISHED');
@@ -408,7 +444,7 @@ test('an unknown event name is ignored without an error', async (t) => {
 test('an event with an ack past the rate limit gets RATE_LIMITED in the ack', async (t) => {
   const ctx = await setup(t, { rateLimit: { capacity: 3, refillPerSec: 0 } });
   const a = await ctx.client();
-  assert.equal((await a.join()).ok, true);
+  assert.equal((await a.create()).ok, true);
   a.progress(1, 'a');
   a.progress(2, 'b');
   const ack = await a.rematch();
@@ -419,7 +455,7 @@ test('an event with an ack past the rate limit gets RATE_LIMITED in the ack', as
 test('an event without an ack past the rate limit gets one game:error RATE_LIMITED per second', async (t) => {
   const ctx = await setup(t, { rateLimit: { capacity: 3, refillPerSec: 0 } });
   const a = await ctx.client();
-  await a.join();
+  await a.create();
   a.progress(1, 'a');
   a.progress(2, 'b');
   a.progress(3, 'c');
@@ -434,24 +470,24 @@ test('an event without an ack past the rate limit gets one game:error RATE_LIMIT
 test('a rate-limited progress event is dropped and not applied', async (t) => {
   const ctx = await setup(t, { rateLimit: { capacity: 2, refillPerSec: 0 } });
   const [a, b] = await ctx.racing();
-  // A spent 1 token on join; 1 left.
-  a.progress(1, 'a');
-  a.progress(2, 'b');
-  await a.waitFor('game:error', (e) => e.code === 'RATE_LIMITED');
-  await b.waitFor('race:update');
+  // B (not the host) spent 1 token on join; 1 left. The host spent both on create and start.
+  b.progress(1, 'a');
+  b.progress(2, 'b');
+  await b.waitFor('game:error', (e) => e.code === 'RATE_LIMITED');
+  await a.waitFor('race:update');
   await sleep(60);
-  assert.equal(latestEntry(b, a.playerId).correctChars, 1);
+  assert.equal(latestEntry(a, b.playerId).correctChars, 1);
 });
 
 test('normal typing at the default limit is never rate-limited', async (t) => {
   const ctx = await setup(t, { rateLimit: undefined });
   const [a, b] = await ctx.racing();
-  // 19 events at once is under the default bucket of 20 (join used one).
-  for (let seq = 1; seq <= 19; seq += 1) a.progress(seq, seq % 2 ? 'x' : '\b');
-  b.progress(1, 'a');
-  await b.waitFor('race:update', (u) => u.players.some((p) => p.id === b.playerId && p.correctChars === 1));
+  // 19 events at once is under the default bucket of 20 (B's join used one).
+  for (let seq = 1; seq <= 19; seq += 1) b.progress(seq, seq % 2 ? 'x' : '\b');
+  a.progress(1, 'a');
+  await a.waitFor('race:update', (u) => u.players.some((p) => p.id === a.playerId && p.correctChars === 1));
   await sleep(60);
-  assert.equal(a.pending('game:error').length, 0);
+  assert.equal(b.pending('game:error').length, 0);
 });
 
 /* ---------- Simultaneous finish ---------- */
@@ -484,6 +520,7 @@ function createFlakyStore() {
     },
     saveRoom: (room) => inner.saveRoom(room),
     deleteRoom: (id) => inner.deleteRoom(id),
+    size: () => inner.size(),
     clear: () => inner.clear(),
   };
   return store;
@@ -495,14 +532,18 @@ test('a handler error answers INTERNAL and the server keeps running', async (t) 
   const ctx = await setup(t, { store });
   const a = await ctx.client();
   store.failing = true;
-  const ack = await a.join();
+  const ack = await a.create();
   store.failing = false;
   assert.equal(ack.ok, false);
   assert.equal(ack.error.code, 'INTERNAL');
   assert.equal(console.error.mock.callCount() >= 1, true);
-  // The server still serves: the same socket and a new one both join and race.
-  assert.equal((await a.join()).ok, true);
-  const b = await ctx.joined();
+  assert.equal(a.socket.connected, true, 'INTERNAL does not kick the socket');
+  // The server still serves: the same socket creates, a new one joins, and they race.
+  const created = await a.create();
+  assert.equal(created.ok, true);
+  a.playerId = created.playerId;
+  const b = await ctx.joinedTo(created.room.code);
+  await ctx.start(a);
   await a.waitFor('race:start');
   await b.waitFor('race:start');
 });

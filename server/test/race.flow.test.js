@@ -1,12 +1,15 @@
 'use strict';
 
 /* Socket integration: the full two-client race, the countdown before every
-   race (first race and rematch), the time limit and the rematch paths. */
+   race (first race and rematch), the time limit and the rematch paths.
+   M2: the first client creates the room, the second joins its code, and the
+   host's room:start begins each race. */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup, sleep, FIXED_PASSAGE } = require('./helpers');
 const { COUNTDOWN_MS, RACE_TIME_LIMIT_MS } = require('../src/constants');
+const { isValidRoomCode } = require('../src/roomCode');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // Allowed gap between the server firing its timer and the client seeing the
@@ -31,25 +34,27 @@ function indexOfEvent(client, name, from = 0) {
 
 /* ---------- Full race ---------- */
 
-test('two clients race the same passage from join to results', async (t) => {
+test('two clients race the same passage from create and join to results', async (t) => {
   const ctx = await setup(t);
 
-  // A joins an empty room and waits.
+  // A creates a room and waits.
   const a = await ctx.client();
-  const ackA = await a.join();
+  const ackA = await a.create();
   assert.equal(ackA.ok, true);
   assert.match(ackA.playerId, UUID);
   assert.notEqual(ackA.playerId, a.socket.id);
   assert.equal(ackA.room.phase, 'waiting');
   assert.equal(ackA.room.players.length, 1);
+  assert.ok(isValidRoomCode(ackA.room.code));
 
-  // B joins: the room fills, a countdown starts with the fixed passage.
+  // B joins by code; the host starts and a countdown begins with the fixed passage.
   const b = await ctx.client();
-  const ackB = await b.join();
+  const ackB = await b.join(ackA.room.code);
   assert.equal(ackB.ok, true);
   assert.notEqual(ackB.playerId, ackA.playerId);
   const idA = ackA.playerId;
   const idB = ackB.playerId;
+  assert.deepEqual(await a.start(), { ok: true });
 
   for (const c of [a, b]) {
     const countdownState = await c.waitFor('room:state', (s) => s.phase === 'countdown');
@@ -126,9 +131,11 @@ test('two clients race the same passage from join to results', async (t) => {
     assert.ok(end.index < finishedState.index);
   }
 
-  // Both press "Race again": a new countdown starts.
+  // Both press "Race again": the room returns to waiting; the host starts again.
   assert.equal((await a.rematch()).ok, true);
   assert.equal((await b.rematch()).ok, true);
+  await a.waitFor('room:state', (s) => s.phase === 'waiting');
+  assert.deepEqual(await a.start(), { ok: true });
   for (const c of [a, b]) {
     const again = await c.waitFor('race:countdown');
     assert.equal(again.payload.passage, FIXED_PASSAGE);
@@ -182,8 +189,8 @@ test('race:countdown always comes before race:start, right after room:state coun
 
 test('race:countdown announces the configured countdown and time limit', async (t) => {
   const ctx = await setup(t, { countdownMs: 120, raceTimeLimitMs: 1500 });
-  await ctx.joined();
-  const b = await ctx.joined();
+  const [, b] = await ctx.lobby(2);
+  await ctx.start();
   const countdown = await b.waitFor('race:countdown');
   assert.equal(countdown.payload.startsInMs, 120);
   assert.equal(countdown.payload.raceTimeLimitMs, 1500);
@@ -194,20 +201,19 @@ test('race:countdown announces the configured countdown and time limit', async (
 test('race:start does not arrive before the countdown has elapsed', async (t) => {
   const countdownMs = 150;
   const ctx = await setup(t, { countdownMs });
-  await ctx.joined();
-  const b = await ctx.client();
-  const joinedAt = performance.now();
-  await b.join();
+  const [, b] = await ctx.lobby(2);
+  const startedAt = performance.now();
+  await ctx.start();
   const countdown = await b.waitFor('race:countdown');
   const start = await b.waitFor('race:start');
   assert.ok(start.at - countdown.at >= countdownMs - TIMING_SLACK_MS, `gap was ${start.at - countdown.at} ms`);
-  assert.ok(start.at - joinedAt >= countdownMs - TIMING_SLACK_MS);
+  assert.ok(start.at - startedAt >= countdownMs - TIMING_SLACK_MS);
 });
 
 test('the server default countdown of 3000 ms is announced in race:countdown', async (t) => {
   const ctx = await setup(t, { countdownMs: undefined, raceTimeLimitMs: undefined });
-  await ctx.joined();
-  const b = await ctx.joined();
+  const [, b] = await ctx.lobby(2);
+  await ctx.start();
   const countdown = await b.waitFor('race:countdown');
   assert.equal(countdown.payload.startsInMs, COUNTDOWN_MS);
   assert.equal(countdown.payload.startsInMs, 3000);
@@ -216,7 +222,7 @@ test('the server default countdown of 3000 ms is announced in race:countdown', a
   assert.equal(b.pending('race:start').length, 0, 'the race has not started 300 ms into a 3 s countdown');
 });
 
-test('a rematch starts with a countdown before race:start, with the same timing', async (t) => {
+test('a rematch started by the host has a countdown before race:start, with the same timing', async (t) => {
   const countdownMs = 150;
   const ctx = await setup(t, { countdownMs });
   const [a, b] = await ctx.racing();
@@ -225,6 +231,8 @@ test('a rematch starts with a countdown before race:start, with the same timing'
   await Promise.all([a.waitFor('race:end'), b.waitFor('race:end')]);
   await a.rematch();
   await b.rematch();
+  await a.waitFor('room:state', (s) => s.phase === 'waiting');
+  await ctx.start(a);
   for (const c of [a, b]) {
     const countdown = await c.waitFor('race:countdown');
     assert.equal(countdown.payload.startsInMs, countdownMs);
@@ -239,6 +247,7 @@ test('a rematch starts with a countdown before race:start, with the same timing'
     'room:state:finished',
     'room:state:finished',
     'room:state:finished',
+    'room:state:waiting',
     'room:state:countdown',
     'race:countdown',
     'room:state:racing',
@@ -254,6 +263,7 @@ test('progress in a rematch race starts again from seq 1 and zero', async (t) =>
   await Promise.all([a.waitFor('race:end'), b.waitFor('race:end')]);
   await a.rematch();
   await b.rematch();
+  await ctx.start(a);
   await Promise.all([a.waitFor('race:start'), b.waitFor('race:start')]);
   a.drain();
   b.progress(1, 'a');
@@ -350,7 +360,7 @@ test('a repeated rematch while waiting sends only the ack', async (t) => {
   assert.deepEqual(a.events.slice(before).map((e) => e.name), []);
 });
 
-test('a new player joining after a lone rematch starts a countdown', async (t) => {
+test('a new player joining after a lone rematch does not start a race until the host starts', async (t) => {
   const ctx = await setup(t);
   const [a, b] = await ctx.racing();
   a.progress(1, FIXED_PASSAGE);
@@ -361,11 +371,14 @@ test('a new player joining after a lone rematch starts a countdown', async (t) =
   await a.waitFor('room:state', (s) => s.phase === 'waiting');
   const c = await ctx.joined();
   assert.equal(c.joinAck.room.phase, 'waiting');
+  await sleep(150);
+  assert.equal(a.pending('race:countdown').length, 0, 'no automatic start');
+  await ctx.start(a);
   await a.waitFor('race:countdown');
   await c.waitFor('race:start');
 });
 
-test('a player joining a finished room waits until the remaining player presses rematch', async (t) => {
+test('a player joining a finished room moves it to waiting once the remaining player rematches', async (t) => {
   const ctx = await setup(t);
   const [a, b] = await ctx.racing();
   a.progress(1, FIXED_PASSAGE);
@@ -389,6 +402,9 @@ test('a player joining a finished room waits until the remaining player presses 
   assert.equal(c.pending('race:countdown').length, 0);
 
   await a.rematch();
+  await c.waitFor('room:state', (s) => s.phase === 'waiting');
+  assert.equal(c.pending('race:countdown').length, 0);
+  await ctx.start(a);
   await c.waitFor('race:countdown');
   await c.waitFor('race:start');
 });
@@ -397,8 +413,8 @@ test('the race clock starts when the countdown timer actually fires, not when it
   // An injected clock lets the test simulate a timer that fires late.
   let fakeNow = 0;
   const ctx = await setup(t, { countdownMs: 200, now: () => fakeNow });
-  const a = await ctx.joined();
-  const b = await ctx.joined();
+  const [a, b] = await ctx.lobby(2);
+  await ctx.start();
   await a.waitFor('race:countdown'); // scheduled start: 0 + 200
   fakeNow = 1000; // the timer "fires" 800 ms late
   await Promise.all([a.waitFor('race:start'), b.waitFor('race:start')]);

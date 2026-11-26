@@ -5,7 +5,11 @@
    Every server and client created through `setup(t, ...)` is closed in
    `t.after`, so each test owns and tears down its own state. Waits are
    event-based with a timeout; fixed sleeps are used only to prove that
-   something did NOT happen. */
+   something did NOT happen.
+
+   Rooms (M2): the first `ctx.joined()` in a test creates a room (that client
+   is `ctx.host`, the code is `ctx.code`); later calls join that code. The
+   race never starts by itself: `ctx.start()` sends the host's room:start. */
 
 const { io: ioClient } = require('socket.io-client');
 const { createServer } = require('../src/app');
@@ -16,13 +20,26 @@ const FAST_OPTIONS = Object.freeze({
   countdownMs: 50,
   raceTimeLimitMs: 2000,
   broadcastIntervalMs: 20,
+  lobbyTimeoutMs: 2000,
   pickPassage: () => FIXED_PASSAGE,
 });
 
 const DEFAULT_WAIT_MS = 2000;
 
+// A canonical code that tests never create unless they inject randomness.
+const UNUSED_CODE = 'K7QM2X';
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Polls `check` until it returns true, or fails after `timeoutMs`. */
+async function eventually(check, message, timeoutMs = 1000) {
+  const deadline = performance.now() + timeoutMs;
+  while (!check()) {
+    if (performance.now() > deadline) throw new Error(`Timed out: ${message}`);
+    await sleep(5);
+  }
 }
 
 /**
@@ -78,7 +95,15 @@ function recordEvents(socket) {
     return events.length;
   }
 
-  return { events, waitFor, pending, drain };
+  /** The payload of the latest room:state seen (consumed or not), or null. */
+  function lastState() {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      if (events[i].name === 'room:state') return events[i].payload;
+    }
+    return null;
+  }
+
+  return { events, waitFor, pending, drain, lastState };
 }
 
 function connect(url, extra = {}) {
@@ -100,7 +125,10 @@ function connect(url, extra = {}) {
   client.connected.catch(() => {});
 
   client.emitAck = (event, ...args) => socket.timeout(DEFAULT_WAIT_MS).emitWithAck(event, ...args);
-  client.join = () => client.emitAck('room:join', {});
+  client.create = () => client.emitAck('room:create', {});
+  client.join = (code) => client.emitAck('room:join', { code });
+  client.start = () => client.emitAck('room:start', {});
+  client.extend = () => client.emitAck('room:extend', {});
   client.rematch = () => client.emitAck('race:rematch', {});
   client.progress = (seq, keys) => socket.emit('race:progress', { seq, keys });
 
@@ -115,6 +143,10 @@ function connect(url, extra = {}) {
     }
   };
   return client;
+}
+
+function assertOkAck(ack, what) {
+  if (!ack || ack.ok !== true) throw new Error(`${what} failed: ${JSON.stringify(ack)}`);
 }
 
 /**
@@ -132,6 +164,10 @@ async function setup(t, options = {}) {
     port,
     url,
     clients,
+    /** Code of the room made by the latest `created()` (or first `joined()`). */
+    code: null,
+    /** The client that created that room. */
+    host: null,
     /** Connects a client and waits for the connection. */
     async client(extra) {
       const c = connect(url, extra);
@@ -145,23 +181,61 @@ async function setup(t, options = {}) {
       clients.push(c);
       return c;
     },
-    /** Connects and joins; returns the client with `playerId` set. */
-    async joined(extra) {
+    /** Connects and creates a new room; it becomes ctx.code / ctx.host. */
+    async created(extra) {
       const c = await ctx.client(extra);
-      const ack = await c.join();
-      if (!ack || ack.ok !== true) throw new Error(`join failed: ${JSON.stringify(ack)}`);
+      const ack = await c.create();
+      assertOkAck(ack, 'create');
       c.playerId = ack.playerId;
       c.joinAck = ack;
+      c.code = ack.room.code;
+      ctx.code = ack.room.code;
+      ctx.host = c;
       return c;
     },
-    /** Two joined clients, both past race:start, with earlier events consumed. */
-    async racing() {
-      const a = await ctx.joined();
-      const b = await ctx.joined();
-      await Promise.all([a.waitFor('race:start'), b.waitFor('race:start')]);
-      a.drain();
-      b.drain();
-      return [a, b];
+    /** Connects and joins `code`; returns the client with `playerId` set. */
+    async joinedTo(code, extra) {
+      const c = await ctx.client(extra);
+      const ack = await c.join(code);
+      assertOkAck(ack, `join ${code}`);
+      c.playerId = ack.playerId;
+      c.joinAck = ack;
+      c.code = code;
+      return c;
+    },
+    /** The first call creates a room; later calls join ctx.code. */
+    async joined(extra) {
+      if (ctx.code === null) return ctx.created(extra);
+      return ctx.joinedTo(ctx.code, extra);
+    },
+    /**
+     * `count` clients in one room, the first being the host. No race started.
+     * Resolves once every client has received the room:state listing all
+     * `count` players (nothing is consumed).
+     */
+    async lobby(count = 2) {
+      const list = [];
+      for (let i = 0; i < count; i += 1) list.push(await ctx.joined());
+      await eventually(
+        () => list.every((c) => c.lastState() !== null && c.lastState().players.length === count),
+        `every client sees ${count} players`,
+        DEFAULT_WAIT_MS
+      );
+      return list;
+    },
+    /** The host's room:start; throws unless the ack is ok. */
+    async start(host = ctx.host) {
+      const ack = await host.start();
+      assertOkAck(ack, 'start');
+      return ack;
+    },
+    /** `count` clients in one room, all past race:start, with earlier events consumed. */
+    async racing(count = 2) {
+      const list = await ctx.lobby(count);
+      await ctx.start(list[0]);
+      await Promise.all(list.map((c) => c.waitFor('race:start')));
+      for (const c of list) c.drain();
+      return list;
     },
   };
 
@@ -173,4 +247,14 @@ async function setup(t, options = {}) {
   return ctx;
 }
 
-module.exports = { setup, connect, sleep, recordEvents, FAST_OPTIONS, FIXED_PASSAGE, DEFAULT_WAIT_MS };
+module.exports = {
+  setup,
+  connect,
+  sleep,
+  eventually,
+  recordEvents,
+  FAST_OPTIONS,
+  FIXED_PASSAGE,
+  DEFAULT_WAIT_MS,
+  UNUSED_CODE,
+};

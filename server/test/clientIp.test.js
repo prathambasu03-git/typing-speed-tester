@@ -4,7 +4,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { getClientIp, normalizeIp } = require('../src/clientIp');
+const { getClientIp, normalizeIp, limiterKey } = require('../src/clientIp');
 
 /* ---------- getClientIp: the D8 table ---------- */
 
@@ -86,4 +86,37 @@ test('normalizeIp returns null for non-strings', () => {
   for (const v of [undefined, null, 1234, {}, ['1.2.3.4'], true]) {
     assert.equal(normalizeIp(v), null, String(v));
   }
+});
+
+/* ---------- limiterKey: IPv6 keyed by /64 ---------- */
+
+const LIMITER_KEYS = [
+  ['203.0.113.5', '203.0.113.5', 'keeps an IPv4 address unchanged'],
+  ['unknown', 'unknown', "keeps 'unknown' unchanged"],
+  ['2001:DB8:1:2::9', '2001:db8:1:2::/64', 'cuts an IPv6 address to its lowercase /64 prefix'],
+  ['2001:db8:1:2:aaaa:bbbb:cccc:dddd', '2001:db8:1:2::/64', 'cuts a full-length IPv6 address to its /64'],
+  ['2001:0db8:0001:0002::1', '2001:db8:1:2::/64', 'writes the prefix hextets in minimal form'],
+  ['::1', '0:0:0:0::/64', 'writes the loopback prefix without further compression'],
+  ['fe80::1%eth0', 'fe80:0:0:0::/64', 'drops a zone id before keying'],
+  ['64:ff9b::1.2.3.4', '64:ff9b:0:0::/64', 'handles an embedded IPv4 tail'],
+  ['::ffff:1.2.3.4', '1.2.3.4', 'reduces an IPv4-mapped address to IPv4'],
+];
+
+for (const [input, expected, sentence] of LIMITER_KEYS) {
+  test(`limiterKey ${sentence}`, () => {
+    assert.equal(limiterKey(input), expected);
+  });
+}
+
+test('limiterKey gives two addresses in one /64 the same key and a neighbouring /64 another', () => {
+  assert.equal(limiterKey('2001:db8:1:2::1'), limiterKey('2001:db8:1:2:ffff::7'));
+  assert.notEqual(limiterKey('2001:db8:1:2::1'), limiterKey('2001:db8:1:3::1'));
+});
+
+test('limiterKey returns a non-IP string unchanged', () => {
+  assert.equal(limiterKey('garbage'), 'garbage');
+});
+
+test('limiterKey of getClientIp keys a forwarded IPv6 client by /64', () => {
+  assert.equal(limiterKey(getClientIp('10.0.0.1', '2001:DB8:1:2::9', 1)), '2001:db8:1:2::/64');
 });

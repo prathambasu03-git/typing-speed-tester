@@ -2,7 +2,15 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { isPlainObject, validateJoin, validateRematch, validateProgress } = require('../src/validate');
+const {
+  isPlainObject,
+  validateCreate,
+  validateJoin,
+  validateStart,
+  validateExtend,
+  validateRematch,
+  validateProgress,
+} = require('../src/validate');
 
 function assertBad(result, label) {
   assert.equal(result.ok, false, label);
@@ -77,20 +85,48 @@ test('validateProgress rejects a lone surrogate', () => {
   assertBad(validateProgress({ seq: 1, keys: 'a\udc00' }));
 });
 
-test('validateJoin and validateRematch accept an empty object and undefined', () => {
-  for (const fn of [validateJoin, validateRematch]) {
-    assert.deepEqual(fn({}), { ok: true, value: {} });
-    assert.deepEqual(fn(undefined), { ok: true, value: {} });
+const EMPTY_PAYLOAD_VALIDATORS = [validateCreate, validateStart, validateExtend, validateRematch];
+
+test('validateCreate, validateStart, validateExtend and validateRematch accept an empty object and undefined', () => {
+  for (const fn of EMPTY_PAYLOAD_VALIDATORS) {
+    assert.deepEqual(fn({}), { ok: true, value: {} }, fn.name);
+    assert.deepEqual(fn(undefined), { ok: true, value: {} }, fn.name);
   }
 });
 
-test('validateJoin and validateRematch ignore extra fields', () => {
-  assert.deepEqual(validateJoin({ name: 'x', room: 'other' }), { ok: true, value: {} });
-  assert.deepEqual(validateRematch({ ready: false }), { ok: true, value: {} });
+test('the empty-payload validators ignore extra fields', () => {
+  for (const fn of EMPTY_PAYLOAD_VALIDATORS) {
+    assert.deepEqual(fn({ ready: false, code: 'K7QM2X' }), { ok: true, value: {} }, fn.name);
+  }
 });
 
-test('validateJoin and validateRematch reject null, arrays, strings and numbers', () => {
-  for (const fn of [validateJoin, validateRematch]) {
+test('the empty-payload validators reject null, arrays, strings and numbers', () => {
+  for (const fn of EMPTY_PAYLOAD_VALIDATORS) {
     for (const payload of [null, [], 'x', 1, true]) assertBad(fn(payload), `${fn.name} ${JSON.stringify(payload)}`);
   }
+});
+
+test('validateJoin accepts a canonical code and returns only the code', () => {
+  assert.deepEqual(validateJoin({ code: 'K7QM2X' }), { ok: true, value: { code: 'K7QM2X' } });
+  assert.deepEqual(validateJoin({ code: 'K7QM2X', name: 'x' }), { ok: true, value: { code: 'K7QM2X' } });
+});
+
+test('validateJoin checks only the shape, so a short or lowercase code passes', () => {
+  assert.deepEqual(validateJoin({ code: 'x' }), { ok: true, value: { code: 'x' } });
+  assert.deepEqual(validateJoin({ code: 'k7qm2x' }), { ok: true, value: { code: 'k7qm2x' } });
+});
+
+test('validateJoin accepts a 16-character code and rejects a 17-character one', () => {
+  assert.equal(validateJoin({ code: 'a'.repeat(16) }).ok, true);
+  assertBad(validateJoin({ code: 'a'.repeat(17) }));
+});
+
+test('validateJoin rejects a missing, empty, non-string or huge code', () => {
+  for (const payload of [{}, { code: '' }, { code: 123 }, { code: null }, { code: ['K7QM2X'] }, { code: 'A'.repeat(100000) }]) {
+    assertBad(validateJoin(payload), JSON.stringify(payload).slice(0, 40));
+  }
+});
+
+test('validateJoin rejects payloads that are not plain objects', () => {
+  for (const payload of [null, [], undefined, 'K7QM2X', 1, true]) assertBad(validateJoin(payload), String(payload));
 });

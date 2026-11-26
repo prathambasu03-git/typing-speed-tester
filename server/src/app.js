@@ -9,7 +9,7 @@ const { Server } = require('socket.io');
 const { DEFAULT_CONFIG } = require('./config');
 const { MAX_HTTP_BUFFER_SIZE } = require('./constants');
 const { isAllowedOrigin } = require('./origin');
-const { getClientIp } = require('./clientIp');
+const { getClientIp, limiterKey } = require('./clientIp');
 const { registerGame } = require('./game');
 
 function buildOriginConfig(options) {
@@ -53,7 +53,10 @@ function createApp() {
 /**
  * Options (all optional): corsOrigins, allowLocalhost, allowNullOrigin,
  * maxConnectionsPerIp, trustProxyHops, countdownMs, raceTimeLimitMs, broadcastIntervalMs,
- * rematchTimeoutMs, joinTimeoutMs, pickPassage, rateLimit { capacity, refillPerSec }, now, store.
+ * rematchTimeoutMs, lobbyTimeoutMs, joinTimeoutMs, pickPassage,
+ * rateLimit { capacity, refillPerSec }, maxPlayers, minPlayers, maxRooms,
+ * createLimit { capacity, refillPerSec }, joinFailLimit { capacity, refillPerSec },
+ * randomInt (room-code randomness), now, store.
  */
 function createServer(options = {}) {
   const originConfig = buildOriginConfig(options);
@@ -63,9 +66,12 @@ function createServer(options = {}) {
 
   // One key function for the cap check and the count, both fed the same
   // handshake request, so they always agree. Express `trust proxy` stays off:
-  // no HTTP route reads req.ip.
+  // no HTTP route reads req.ip. IPv6 is keyed by its /64 (limiterKey), so one
+  // host cannot multiply its limits by rotating addresses inside its prefix.
   function ipOf(req) {
-    return getClientIp(req.socket.remoteAddress, req.headers['x-forwarded-for'], trustProxyHops);
+    return limiterKey(
+      getClientIp(req.socket.remoteAddress, req.headers['x-forwarded-for'], trustProxyHops),
+    );
   }
 
   const app = createApp();
@@ -101,13 +107,22 @@ function createServer(options = {}) {
   const game = registerGame(io, {
     store: options.store,
     now: options.now,
+    // The per-IP room limits use the same key as the connection cap.
+    ipOf,
     pickPassage: options.pickPassage,
     countdownMs: options.countdownMs,
     raceTimeLimitMs: options.raceTimeLimitMs,
     broadcastIntervalMs: options.broadcastIntervalMs,
     rematchTimeoutMs: options.rematchTimeoutMs,
+    lobbyTimeoutMs: options.lobbyTimeoutMs,
     joinTimeoutMs: options.joinTimeoutMs,
     rateLimit: options.rateLimit,
+    maxPlayers: options.maxPlayers,
+    minPlayers: options.minPlayers,
+    maxRooms: options.maxRooms,
+    createLimit: options.createLimit,
+    joinFailLimit: options.joinFailLimit,
+    randomInt: options.randomInt,
   });
 
   /** Resolves to the real port, so `listen(0)` works in tests. */

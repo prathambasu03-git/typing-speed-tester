@@ -11,8 +11,10 @@
    - Phases: idle -> running (first valid key) -> finished (timer hits 0)
              finished -> idle (restart)
    - Multiplayer (section 12) reuses the same `state` with `mode: 'multi'`:
-             connecting -> waiting -> countdown -> running -> finished
-             finished -> countdown (rematch) or waiting (opponent left)
+             menu -> connecting -> waiting (room lobby) -> countdown -> running
+             -> finished -> waiting (Race again, or the host started without
+             this player, who sits that race out)
+             connecting -> menu (join or create error, code kept)
      Socket events update `state`, then render. Only section 12 emits events.
    ========================================================================== */
 
@@ -35,7 +37,8 @@ if (typeof DURATIONS === 'undefined' || typeof computeStats !== 'function' ||
 // multiplayer.js missing only switches multiplayer off; solo never depends on it.
 const MP_AVAILABLE = typeof resolveServerUrl === 'function' && typeof validateRoomState === 'function' &&
   typeof isServerUsable === 'function' && typeof pickServerUrl === 'function' &&
-  typeof MP_CONSTANTS === 'object';
+  typeof parseRoomHash === 'function' && typeof validateStartAck === 'function' &&
+  typeof hostChangeText === 'function' && typeof MP_CONSTANTS === 'object';
 
 /* ---------- 1. Configuration ---------- */
 
@@ -92,10 +95,33 @@ const dom = {
   liveBest: document.getElementById('live-best'),
   liveBestStat: document.getElementById('live-best-stat'),
   mpError: document.getElementById('mp-error'),
+  invite: document.getElementById('invite'),
+  inviteCode: document.getElementById('invite-code'),
+  inviteCodeSpelled: document.getElementById('invite-code-spelled'),
+  inviteJoinBtn: document.getElementById('invite-join-btn'),
+  inviteDismissBtn: document.getElementById('invite-dismiss-btn'),
   racePanel: document.getElementById('race-panel'),
   raceTitle: document.getElementById('race-title'),
+  mpMenu: document.getElementById('mp-menu'),
+  createRoomBtn: document.getElementById('create-room-btn'),
+  joinForm: document.getElementById('join-form'),
+  roomCodeInput: document.getElementById('room-code-input'),
+  roomCodeError: document.getElementById('room-code-error'),
+  menuError: document.getElementById('menu-error'),
+  roomInfo: document.getElementById('room-info'),
+  roomCode: document.getElementById('room-code'),
+  roomCodeSpelled: document.getElementById('room-code-spelled'),
+  roomLink: document.getElementById('room-link'),
+  copyLinkBtn: document.getElementById('copy-link-btn'),
+  copyStatus: document.getElementById('copy-status'),
+  soloTip: document.getElementById('solo-tip'),
   raceStatus: document.getElementById('race-status'),
   raceTracks: document.getElementById('race-tracks'),
+  roomActions: document.getElementById('room-actions'),
+  startBtn: document.getElementById('start-btn'),
+  startHint: document.getElementById('start-hint'),
+  extendBtn: document.getElementById('extend-btn'),
+  leaveRoomBtn: document.getElementById('leave-room-btn'),
   typingArea: document.getElementById('typing-area'),
   track: document.getElementById('words-track'),
   words: document.getElementById('words'),
@@ -224,16 +250,29 @@ function createInitialState(duration) {
 }
 
 /**
+ * A fresh multiplayer session: who we are and the latest room snapshot (its
+ * `code` is the room code). instructionsSpoken: the "fix every mistake" rule
+ * was read out this session.
+ */
+function newSession() {
+  return { playerId: null, room: null, instructionsSpoken: false };
+}
+
+/**
  * Returns a new multiplayer state. `session` ({ playerId, room }) is carried
  * from race to race; everything else starts fresh. Before replacing `state`
- * with this, the caller clears the old interval and flush timer.
+ * with this, the caller clears the old timers (stopRaceTimers).
  */
 function createRaceState(session, { passage = '', raceTimeLimitMs = 0 } = {}) {
   const chars = passage.split(''); // ASCII words, split exactly like the server's passage
   const duration = Math.ceil(raceTimeLimitMs / 1000);
   return {
     mode: 'multi',
-    phase: 'connecting',         // 'connecting' | 'waiting' | 'countdown' | 'running' | 'finished'
+    // 'menu' | 'connecting' | 'waiting' | 'countdown' | 'running' | 'finished'.
+    // 'waiting' is the room lobby view: the room is waiting, or it is finished
+    // and this player pressed Race again (or joined since), or this player
+    // sits out the race that is on.
+    phase: 'menu',
     chars,
     index: 0,
     results: new Array(chars.length).fill(null),
@@ -264,6 +303,16 @@ function createRaceState(session, { passage = '', raceTimeLimitMs = 0 } = {}) {
       rematchWarnTimerId: null,
       connectDeadline: null,     // performance.now() by which the first connection must succeed
       waking: false,             // the "waking up the server" message is shown
+      intent: null,              // { type: 'create' } | { type: 'join', code }, set when connecting
+      menuError: null,           // { code, field: 'join' | 'create', text? }; code 'INPUT' = typed code error
+      codeDraft: '',             // written into the code input only when the menu is entered
+      startRequested: false,     // room:start sent, ack pending
+      startStatus: '',           // start or Stay in room failure, shown in #race-status
+      lobbyDeadline: null,       // performance.now() when the server closes an idle lobby
+      lobbyWarned: false,        // the "closes in about 1 minute" warning is showing
+      lobbyWarnTimerId: null,
+      extendRequested: false,    // room:extend sent, ack pending
+      copyStatus: '',            // result of the last Copy invite link press
     },
   };
 }
@@ -276,6 +325,10 @@ const prefs = { theme: loadTheme() };
 // for the same reason as `prefs`: leaving multiplayer calls restart(), which
 // replaces `state`, and the message must survive that.
 let mpErrorCode = null;
+
+// Room code from a #room= invite link, or null. Outside `state` so it
+// survives restart(); cleared when the invite is used or dismissed.
+let inviteCode = null;
 
 let state = createInitialState(loadDuration());
 
@@ -290,6 +343,8 @@ let lineHeight = 0;
 // they were built for. DOM handles, like `spans`, so they live outside state.
 let trackRows = new Map();
 let trackKey = '';
+// The list's accessible name as last written (index.html starts with this).
+let trackLabel = 'Live progress';
 
 /* ---------- 6. Stats ---------- */
 
@@ -435,8 +490,9 @@ function renderMode() {
   dom.raceHint.hidden = !multi;
   // aria-describedby still reads hidden elements, so point it at the right
   // hint. In a race, the passage only: focus moves here during the countdown
-  // and a long description would delay "Go!". The race instructions are
-  // spoken once instead, when the player starts waiting (onJoinAck).
+  // and a long description would delay "Go!". The race rule is spoken once
+  // per session, at the first countdown (onRaceCountdown), instead of living
+  // in this description, which focus would read at every countdown.
   dom.input.setAttribute('aria-describedby', multi ? 'words-text' : 'typing-hint words-text');
   dom.typingArea.setAttribute('aria-label', multi ? 'Race passage' : 'Typing test. Start typing to begin.');
   dom.resultsTitle.textContent = multi ? 'Race results' : 'Results';
@@ -459,7 +515,8 @@ function renderSettings() {
 
 function renderTimer() {
   // Before a race there is no time limit yet, so show a placeholder, not "0".
-  const noRace = state.mode === 'multi' && (state.phase === 'connecting' || state.phase === 'waiting');
+  const noRace = state.mode === 'multi' &&
+    (state.phase === 'menu' || state.phase === 'connecting' || state.phase === 'waiting');
   dom.timer.textContent = noRace ? '--' : String(Math.ceil(state.timeLeft));
 }
 
@@ -544,15 +601,31 @@ function renderAll(best) {
   renderSettings();
   renderTimer();
   renderLiveStats(0);
+  renderInvite();
   if (state.mode === 'multi') {
     renderRacePanel();
     renderRaceTracks();
+    renderLobby();
+    renderMenu();
     if (state.chars.length > 0) renderText();
     else clearText();
   } else {
     renderBest(best);
     renderText();
   }
+}
+
+/**
+ * The invite banner, only in solo (it is replaced by the menu in multi).
+ * spellRoomCode is only reached with an invite code, which needs
+ * multiplayer.js, so this is safe when that file failed to load.
+ */
+function renderInvite() {
+  const show = inviteCode !== null && state.mode === 'solo';
+  dom.invite.hidden = !show;
+  if (!show) return;
+  dom.inviteCode.textContent = inviteCode;
+  dom.inviteCodeSpelled.textContent = spellRoomCode(inviteCode);
 }
 
 /** Shown instead of the text when words.js failed to load. */
@@ -598,14 +671,20 @@ function renderMpError() {
 // Handles for deferred announcements. Kept outside `state` because restart()
 // replaces `state` and must still be able to cancel them.
 let resultAnnounceTimer = 0;
-// The text announceSoon is waiting to speak, so setResultsStatus can join it.
+// The text announceSoon is waiting to speak, so setResultsStatus can join it,
+// with its onSpoken callback and the state it belongs to, so a joined message
+// keeps both.
 let pendingAnnouncement = '';
+let pendingOnSpoken = null;
+let pendingState = null;
 let restartAnnounceFrame = 0;
 
 function cancelResultAnnouncement() {
   clearTimeout(resultAnnounceTimer);
   resultAnnounceTimer = 0;
   pendingAnnouncement = '';
+  pendingOnSpoken = null;
+  pendingState = null;
 }
 
 function stopTimer() {
@@ -849,11 +928,26 @@ function extendTextIfNeeded() {
 /* ---------- 10. Input handling ---------- */
 
 function isInteractiveTarget(target) {
-  return target instanceof Element && target !== dom.input &&
+  return typeof Element !== 'undefined' && target instanceof Element && target !== dom.input &&
     target.closest('button, a, input, select, textarea') !== null;
 }
 
+/**
+ * Fields the user types into (the room code, the invite link). Explicit
+ * comparisons first, so the check needs no real DOM; then any other text
+ * field, so no future form control has its keys taken by the test.
+ */
+function isTextEntryTarget(target) {
+  if (target === dom.roomCodeInput || target === dom.roomLink) return true;
+  return typeof Element !== 'undefined' && target instanceof Element && target !== dom.input &&
+    target.closest('input, textarea, select') !== null;
+}
+
 function handleKeydown(event) {
+  // Keys typed into a form field belong to it: they must neither start nor
+  // feed the solo test, and Space or Enter there must keep their meaning.
+  if (isTextEntryTarget(event.target)) return;
+
   // Escape restarts, but only from the typing input. Tab is never captured, so
   // keyboard users can always move focus (WCAG 2.1.1).
   if (event.key === 'Escape' && event.target === dom.input) {
@@ -1048,9 +1142,27 @@ function init() {
     dom.mode.addEventListener('click', handleModeClick); // event delegation
     dom.leaveBtn.addEventListener('click', () => leaveMultiplayer());
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    dom.createRoomBtn.addEventListener('click', () => connectToRoom({ type: 'create' }));
+    dom.joinForm.addEventListener('submit', handleJoinSubmit);
+    dom.copyLinkBtn.addEventListener('click', copyInviteLink);
+    dom.startBtn.addEventListener('click', requestStart);
+    dom.extendBtn.addEventListener('click', requestExtend);
+    dom.leaveRoomBtn.addEventListener('click', leaveRoom);
+    dom.inviteJoinBtn.addEventListener('click', handleInviteJoin);
+    dom.inviteDismissBtn.addEventListener('click', handleInviteDismiss);
+    window.addEventListener('hashchange', handleHashChange);
+    dom.soloTip.textContent = SOLO_TIP;
+
+    // An invite link only shows the banner: nothing is sent to the server
+    // until the user presses Join room (or Multiplayer).
+    inviteCode = parseRoomHash(window.location.hash);
+    renderInvite();
   }
 
-  focusInput();
+  // With an invite, focus its Join button; typing still reaches the test
+  // through the idle redirect in handleKeydown.
+  if (inviteCode !== null) dom.inviteJoinBtn.focus();
+  else focusInput();
 
   // Web fonts can change character widths after load; re-measure once ready.
   if (document.fonts && document.fonts.ready) {
@@ -1078,7 +1190,8 @@ let socketIoCancel = null;
 let wakeNoticeTimer = 0;
 let connectRetryTimer = 0;
 // Exit code for the disconnect the server announced with game:error just
-// before closing the socket (IDLE_TIMEOUT); null means an unexpected drop.
+// before closing the socket (IDLE_TIMEOUT, ROOM_EXPIRED); null means an
+// unexpected drop.
 let mpDisconnectCode = null;
 
 /* 12.1 Helpers */
@@ -1111,6 +1224,13 @@ function clearRematchWarnTimer() {
   }
 }
 
+function clearLobbyWarnTimer() {
+  if (state.mp && state.mp.lobbyWarnTimerId !== null) {
+    clearTimeout(state.mp.lobbyWarnTimerId);
+    state.mp.lobbyWarnTimerId = null;
+  }
+}
+
 /** Clears the timers of the first connection (waking notice, connect retry). */
 function clearConnectTimers() {
   clearTimeout(wakeNoticeTimer);
@@ -1124,6 +1244,7 @@ function stopRaceTimers() {
   stopTimer();
   clearFlushTimer();
   clearRematchWarnTimer();
+  clearLobbyWarnTimer();
   clearConnectTimers();
 }
 
@@ -1137,22 +1258,53 @@ function isFocusIn(element) {
  * stale message is never read. Shares the timer that restart() cancels.
  * `onSpoken`, if given, runs only when the message is actually written.
  */
-function announceSoon(message, onSpoken) {
-  const expected = state;
+function announceSoon(message, onSpoken = null, expected = state) {
   cancelResultAnnouncement();
   pendingAnnouncement = message;
+  pendingOnSpoken = onSpoken;
+  pendingState = expected;
   resultAnnounceTimer = setTimeout(() => {
     resultAnnounceTimer = 0;
     pendingAnnouncement = '';
+    pendingOnSpoken = null;
+    pendingState = null;
     if (state !== expected) return;
     announce(message);
     if (onSpoken) onSpoken();
   }, CONFIG.resultAnnounceDelayMs);
 }
 
-/** "Opponent" reads better as "Your opponent" at the start of a sentence. */
-function opponentSubject(label) {
-  return label === 'Opponent' ? 'Your opponent' : label;
+/**
+ * Announces now, or, while an announceSoon message is still pending, joins
+ * it, so one snapshot never overwrites the message before it. A pending
+ * message from a replaced state is stale: it is dropped, not brought back.
+ */
+function announceAfterPending(message) {
+  if (!message) return;
+  if (resultAnnounceTimer === 0) {
+    announce(message);
+  } else if (state !== pendingState) {
+    cancelResultAnnouncement();
+    announce(message);
+  } else {
+    // Same delay again, for the same state, with the original callback.
+    announceSoon(`${pendingAnnouncement} ${message}`, pendingOnSpoken, pendingState);
+  }
+}
+
+/**
+ * For messages a user can trigger twice in a row (a failed start, a copy, a
+ * bad code): cleared first and written on the next frame, as in restart(),
+ * so the same text is read again. Dropped if `state` was replaced meanwhile.
+ */
+function announceRepeatable(message) {
+  const expected = state;
+  announce('');
+  cancelAnimationFrame(restartAnnounceFrame);
+  restartAnnounceFrame = requestAnimationFrame(() => {
+    restartAnnounceFrame = 0;
+    if (state === expected) announce(message);
+  });
 }
 
 // Shown (and announced once) when the first connection to a remote server is
@@ -1161,43 +1313,90 @@ function opponentSubject(label) {
 const WAKE_STATUS = 'Waking up the game server, this can take up to a minute… Choose Solo to cancel.';
 const WAKE_ANNOUNCEMENT = 'Waking up the game server, this can take up to a minute. Choose Solo to cancel.';
 
-// Shown while the server moves a ready player with no opponent to 'waiting'.
-// Never announced: enterWaiting says "Waiting for a new opponent." right after.
-const STATUS_WAITING_NEW_OPPONENT = 'Waiting for a new opponent…';
+// Shown on the results card while the Race again ack is on its way. Never
+// announced: the ack moves the player to the lobby, which says so.
+const STATUS_BACK_TO_ROOM = 'Going back to the room…';
 
-/** Results-card status line, from the room snapshot after a race. */
+// Shown in the lobby (and announced once) about a minute before an idle
+// room closes; Stay in room appears with it.
+const LOBBY_WARNING = 'No race has started, so this room closes in about 1 minute. Press Stay in room to keep it open.';
+
+// Error codes after which a failed create or join goes back to the menu with
+// the code kept, instead of ending multiplayer. RATE_LIMITED is added by
+// menuFieldFor, on the field of whichever was tried.
+const JOIN_MENU_CODES = Object.freeze(['BAD_CODE', 'ROOM_NOT_FOUND', 'ROOM_FULL', 'RACE_IN_PROGRESS']);
+const CREATE_MENU_CODES = Object.freeze(['TOO_MANY_ROOMS']);
+
+/** 'join' or 'create' for an entry error shown in the menu, else null (solo). */
+function menuFieldFor(code, intentType) {
+  if (JOIN_MENU_CODES.includes(code)) return 'join';
+  if (CREATE_MENU_CODES.includes(code)) return 'create';
+  if (code === 'RATE_LIMITED') return intentType === 'join' ? 'join' : 'create';
+  return null;
+}
+
+/** Results-card status line for a player still on their results. */
 function rematchStatus(room) {
   const selfId = getSelfId();
-  const self = room.players.find((player) => player.id === selfId);
-  const opponents = room.players.filter((player) => player.id !== selfId);
-  const selfReady = Boolean(self && self.ready);
-
-  if (opponents.length === 0) {
-    return selfReady
-      ? STATUS_WAITING_NEW_OPPONENT
-      : 'Your opponent left. Press Race again to wait for a new one.';
-  }
-  if (selfReady) return 'Waiting for your opponent to race again.';
-  // Without results (race:end was lost) it is unknown who raced, so skip this.
-  const raced = state.mp.results;
-  if (raced && opponents.some((player) => !raced.some((entry) => entry.id === player.id))) {
-    return 'A new opponent joined. Press Race again to start.';
-  }
-  if (opponents.some((player) => player.ready)) return 'Your opponent wants a rematch.';
+  const others = room.players.filter((player) => player.id !== selfId);
+  if (others.length === 0) return 'Everyone else left. Press Race again to go back to the room.';
+  // Ready players pressed Race again, joined since the race, or sat it out.
+  const n = others.filter((player) => player.ready).length;
+  if (n > 0) return `${n} ${n === 1 ? 'player is' : 'players are'} back in the room.`;
   return '';
+}
+
+/** Said when Race again takes this player back to the room lobby. */
+function rematchBackText() {
+  const room = state.mp.session.room;
+  const selfId = getSelfId();
+  if (room && room.hostId === selfId) {
+    if (canStartRace(room, selfId)) return 'Back in the room. You can start the race.';
+    const hint = startHint(room, selfId);
+    return hint ? `Back in the room. ${hint}` : 'Back in the room.';
+  }
+  return 'Back in the room. Waiting for the host to start.';
 }
 
 /* 12.2 Race rendering (state -> DOM, write only) */
 
+/** The status line in the room lobby view (client phase 'waiting'). */
+function lobbyStatusText() {
+  const mp = state.mp;
+  const room = mp.session.room;
+  if (!room) return '';
+  const selfId = getSelfId();
+  const isHost = room.hostId === selfId;
+  let text;
+  if (mp.startStatus) {
+    text = mp.startStatus;
+  } else if (isSittingOut(room, selfId)) {
+    text = SIT_OUT_MESSAGE;
+  } else if (room.phase === 'finished') {
+    text = isHost
+      ? `${readyCount(room, selfId)} of ${room.players.length} players are back in the room. ` +
+        'Players still on their results will join the next race.'
+      : 'Waiting for the host to start the next race…';
+  } else if (room.phase === 'waiting') {
+    if (!isHost) text = 'Waiting for the host to start the race…';
+    else if (room.players.length < 2) text = 'Share the code or link so others can join.';
+    else text = `${room.players.length} of ${room.maxPlayers} players here. Press Start race when everyone is ready.`;
+  } else {
+    // This player races (inRace) and race:countdown is a moment away.
+    text = 'Get ready…';
+  }
+  return mp.lobbyWarned ? `${text} ${LOBBY_WARNING}` : text;
+}
+
 function raceStatusText() {
   const mp = state.mp;
   switch (state.phase) {
+    case 'menu':
+      return ''; // the menu speaks for itself
     case 'connecting':
       return mp.waking ? WAKE_STATUS : 'Connecting to the multiplayer server…';
-    case 'waiting': {
-      const hasOpponent = getRoomPlayers().some((player) => player.id !== getSelfId());
-      return hasOpponent ? 'Waiting for your opponent to be ready…' : 'Waiting for an opponent…';
-    }
+    case 'waiting':
+      return lobbyStatusText();
     case 'countdown':
       return mp.countdownSeconds > 0 ? `Race starts in ${mp.countdownSeconds}` : 'Get ready…';
     case 'running': {
@@ -1222,6 +1421,13 @@ function renderRacePanel() {
 
 function trackMetaText(player) {
   if (!player.connected) return 'left the race';
+  if (state.phase === 'waiting') {
+    // The lobby view lists everyone, with where they are instead of progress.
+    const room = state.mp.session.room;
+    if (room.phase === 'finished') return player.ready ? 'in the room' : 'on the results';
+    if (room.phase === 'countdown' || room.phase === 'racing') return player.inRace ? 'racing' : 'sitting out';
+    return 'in the room';
+  }
   const entry = state.mp.progress[player.id];
   if (!entry) return '0% · 0 wpm';
   if (entry.finished && entry.place !== null) return `finished ${ordinal(entry.place)} · ${entry.wpm} wpm`;
@@ -1233,7 +1439,23 @@ function trackScale(player) {
   return entry ? entry.progress / 100 : 0;
 }
 
-/** Rebuilds the rows. Only when the set of players changes, since labels depend on it. */
+/** " (host)" after the host's name, on the tracks and the results list. */
+function hostSuffix(playerId) {
+  const room = state.mp.session.room;
+  return room && room.hostId === playerId ? ' (host)' : '';
+}
+
+/**
+ * Players with a track: during this player's own countdown and race only the
+ * racers (players who sit out have no progress); in the lobby view everyone.
+ */
+function listedPlayers() {
+  const players = getRoomPlayers();
+  if (state.phase === 'countdown' || state.phase === 'running') return players.filter((player) => player.inRace);
+  return players;
+}
+
+/** Rebuilds the rows. Only when the players or the host change, since labels depend on them. */
 function buildRaceTracks(players) {
   const selfId = getSelfId();
   const fragment = document.createDocumentFragment();
@@ -1245,7 +1467,7 @@ function buildRaceTracks(players) {
 
     const name = document.createElement('span');
     name.className = 'race-name';
-    name.textContent = labelFor(player.id, selfId, players);
+    name.textContent = labelFor(player.id, selfId, players) + hostSuffix(player.id);
 
     // Keeps "You" and "45%" apart when a screen reader reads the row as one line.
     const separator = document.createElement('span');
@@ -1273,10 +1495,17 @@ function buildRaceTracks(players) {
 
 /** Updates text and bar width in place; writes only what changed. */
 function renderRaceTracks() {
-  const players = getRoomPlayers();
-  // An empty "Live progress" list (while connecting) is noise for screen readers.
+  const players = listedPlayers();
+  // An empty "Live progress" list (menu, connecting) is noise for screen readers.
   dom.raceTracks.hidden = players.length === 0;
-  const key = JSON.stringify([getSelfId(), ...players.map((player) => player.id)]);
+  // In the lobby view the list says who is here, not how far they are.
+  const label = state.phase === 'waiting' ? 'Players in the room' : 'Live progress';
+  if (label !== trackLabel) {
+    dom.raceTracks.setAttribute('aria-label', label);
+    trackLabel = label;
+  }
+  const room = state.mp.session.room;
+  const key = JSON.stringify([getSelfId(), room ? room.hostId : null, ...players.map((player) => player.id)]);
   if (key !== trackKey) {
     buildRaceTracks(players);
     trackKey = key;
@@ -1298,7 +1527,7 @@ function renderRaceTracks() {
 }
 
 function raceResultText(entry, results) {
-  const label = labelFor(entry.id, getSelfId(), results);
+  const label = labelFor(entry.id, getSelfId(), results) + hostSuffix(entry.id);
   let ending = formatRaceTime(entry.timeMs);
   if (entry.status === 'unfinished') ending = 'did not finish';
   else if (entry.status === 'left') ending = 'left the race';
@@ -1359,14 +1588,102 @@ function renderRaceResultsStatus() {
   const mp = state.mp;
   dom.resBest.classList.remove('is-new');
   dom.resBest.textContent = [mp.resultsStatus, rematchNoticeText()].filter(Boolean).join(' ');
-  dom.restartBtn.textContent = mp.rematchRequested ? 'Waiting for opponent…' : 'Race again';
-  if (mp.rematchRequested) dom.restartBtn.setAttribute('aria-disabled', 'true');
-  else dom.restartBtn.removeAttribute('aria-disabled');
+  dom.restartBtn.textContent = mp.rematchRequested ? 'Going back…' : 'Race again';
+  setAriaDisabled(dom.restartBtn, mp.rematchRequested);
+}
+
+/** aria-disabled, not `disabled`, so the button keeps keyboard focus. */
+function setAriaDisabled(button, isDisabled) {
+  if (isDisabled) button.setAttribute('aria-disabled', 'true');
+  else button.removeAttribute('aria-disabled');
+}
+
+// Last text renderLobby wrote to each element, so it writes only what changed
+// without reading the DOM back. Only renderLobby writes these elements.
+const lobbyTexts = new Map();
+
+function writeLobbyText(element, text) {
+  if (lobbyTexts.get(element) === text) return;
+  lobbyTexts.set(element, text);
+  element.textContent = text;
+}
+
+/**
+ * Menu and room lobby visibility, the room code and link, Start race, the
+ * start hint and Stay in room. Room info and actions show only in the lobby
+ * view, so this player's own countdown and race stay calm.
+ */
+function renderLobby() {
+  const mp = state.mp;
+  const room = mp.session.room;
+  const beforeRoom = state.phase === 'menu' || state.phase === 'connecting';
+  writeLobbyText(dom.raceTitle, beforeRoom ? 'multiplayer' : 'race room');
+  dom.mpMenu.hidden = state.phase !== 'menu';
+  const inLobby = state.phase === 'waiting' && room !== null;
+  dom.roomInfo.hidden = !inLobby;
+  dom.roomActions.hidden = !inLobby;
+  if (!inLobby) return;
+
+  const selfId = getSelfId();
+  writeLobbyText(dom.roomCode, room.code);
+  writeLobbyText(dom.roomCodeSpelled, `Room code ${spellRoomCode(room.code)}`);
+  const link = buildShareLink(window.location.href, room.code) || '';
+  if (lobbyTexts.get(dom.roomLink) !== link) {
+    lobbyTexts.set(dom.roomLink, link);
+    dom.roomLink.value = link;
+  }
+  writeLobbyText(dom.copyStatus, mp.copyStatus);
+  // Only its hidden attribute changes, so a render never announces it.
+  dom.soloTip.hidden = !isAloneInLobby(room);
+
+  const isHost = room.hostId === selfId;
+  dom.startBtn.hidden = !isHost;
+  setAriaDisabled(dom.startBtn, !canStartRace(room, selfId) || mp.startRequested);
+  writeLobbyText(dom.startBtn, mp.startRequested ? 'Starting…' : 'Start race');
+  const hint = isHost ? startHint(room, selfId) : '';
+  writeLobbyText(dom.startHint, hint);
+  dom.startHint.hidden = hint === '';
+
+  dom.extendBtn.hidden = !mp.lobbyWarned;
+  setAriaDisabled(dom.extendBtn, mp.extendRequested);
+  writeLobbyText(dom.extendBtn, mp.extendRequested ? 'Keeping the room open…' : 'Stay in room');
+}
+
+/** Inline errors in the menu: under the code input (join) or under Create (create). */
+function renderMenu() {
+  const error = state.mp.menuError;
+  let joinText = '';
+  if (error && error.field === 'join') joinText = error.code === 'INPUT' ? error.text : errorMessage(error.code);
+  dom.roomCodeError.textContent = joinText;
+  dom.roomCodeError.hidden = joinText === '';
+  if (joinText) dom.roomCodeInput.setAttribute('aria-invalid', 'true');
+  else dom.roomCodeInput.removeAttribute('aria-invalid');
+
+  // Not a live region (like the join error): returnToMenu focuses Create,
+  // whose aria-describedby reads this text once. Cleared on hide so a stale
+  // message is never part of Create's description.
+  if (error && error.field === 'create') {
+    dom.menuError.hidden = false;
+    dom.menuError.textContent = errorMessage(error.code);
+  } else {
+    dom.menuError.hidden = true;
+    dom.menuError.textContent = '';
+  }
+}
+
+/** Only when the menu is entered or the hash changes there, never while typing. */
+function renderMenuInput() {
+  dom.roomCodeInput.value = state.mp.codeDraft;
 }
 
 /* 12.3 Connecting */
 
-function startMultiplayer() {
+/**
+ * Multiplayer pressed: the menu (Create, or Join with a code). No socket yet;
+ * the Socket.io script starts loading in the background, which wakes a
+ * sleeping server while the user chooses. Focus stays on the mode button.
+ */
+function startMultiplayer({ announceMenu = true } = {}) {
   if (state.mode === 'multi' || !MP_ENABLED) return;
   clearConnectTimers();
   stopTimer();
@@ -1376,23 +1693,56 @@ function startMultiplayer() {
   mpErrorCode = null;
   mpDisconnectCode = null;
 
-  // instructionsSpoken: the "fix every mistake" rule was read out this session.
-  state = createRaceState({ playerId: null, room: null, instructionsSpoken: false });
-  const mp = state.mp;
-  // A timestamp, so throttled timers in a hidden tab never extend the budget.
-  mp.connectDeadline = performance.now() + connectBudgetMs(CONFIG.serverUrl);
+  state = createRaceState(newSession());
+  state.mp.codeDraft = inviteCode || '';
   renderMpError();
   renderAll();
-  announce('Connecting to the multiplayer server.');
+  renderMenuInput();
+  if (announceMenu) announce('Multiplayer. Create a room, or join one with a code.');
+  prefetchSocketIo();
+}
+
+/**
+ * Starts the script load with its own budget and ignores the outcome: a
+ * failure resets the cache, so Create or Join loads again within theirs.
+ */
+function prefetchSocketIo() {
+  loadSocketIo(CONFIG.serverUrl, performance.now() + connectBudgetMs(CONFIG.serverUrl)).catch(() => {});
+}
+
+/**
+ * Create or Join pressed: the cold-start flow (one budget from this press,
+ * retries, the waking notice), then room:create or room:join on connect.
+ */
+function connectToRoom(intent) {
+  if (state.mode !== 'multi' || state.phase !== 'menu') return;
+  clearConnectTimers();
+  const mp = state.mp;
+  mp.intent = intent;
+  mp.menuError = null;
+  mp.waking = false;
+  state.phase = 'connecting';
+  // A timestamp, so throttled timers in a hidden tab never extend the budget.
+  mp.connectDeadline = performance.now() + connectBudgetMs(CONFIG.serverUrl);
+  renderAll();
+  // The menu that had focus is now hidden.
+  dom.raceTitle.focus();
+  announceSoon('Connecting to the multiplayer server.');
   // A local server never sleeps, so only a remote one gets the waking notice.
   if (!isLoopbackUrl(CONFIG.serverUrl)) {
     wakeNoticeTimer = setTimeout(() => showWakeNotice(mp), MP_CONSTANTS.wakeNoticeDelayMs);
   }
-  // The `state.mp === mp` checks drop a result that arrives after Solo (or a
-  // new Multiplayer press) replaced this session.
+  loadAndConnect(mp);
+}
+
+/**
+ * The `state.mp === mp` checks drop a result that arrives after Solo (or a
+ * return to the menu) replaced this session.
+ */
+function loadAndConnect(mp) {
   loadSocketIo(CONFIG.serverUrl, mp.connectDeadline).then(
     (ioFactory) => { if (state.mp === mp) connectSocket(ioFactory); },
-    () => { if (state.mp === mp) handleSocketIoLoadFailure(); },
+    () => onSocketIoLoadFailed(mp),
   );
 }
 
@@ -1500,17 +1850,30 @@ function loadSocketIo(serverUrl, deadline) {
 /**
  * Stops a pending script load (Solo pressed while waking), so no retry runs
  * later and the next Multiplayer press starts a fresh load. A loaded script
- * stays cached. The pending promise rejects; startMultiplayer ignores it.
+ * stays cached. The pending promise rejects; its callers ignore that, since
+ * `state.mp` has changed by then.
  */
 function cancelSocketIoLoad() {
   if (socketIoCancel !== null) socketIoCancel();
 }
 
-function handleSocketIoLoadFailure() {
+/**
+ * The cached load may be the background one, with an earlier deadline than
+ * this attempt's, so another load is started while this budget allows.
+ */
+function onSocketIoLoadFailed(mp) {
   // Ignored if the user went back to solo meanwhile, or another attempt connected.
-  if (state.mode === 'multi' && state.phase === 'connecting' && mpSocket === null) {
+  if (state.mp !== mp || state.phase !== 'connecting' || mpSocket !== null) return;
+  const delay = retryDelayWithin(performance.now(), mp.connectDeadline, MP_CONSTANTS.wakeRetryDelayMs);
+  if (delay === null) {
     leaveMultiplayer('UNREACHABLE');
+    return;
   }
+  clearTimeout(connectRetryTimer);
+  connectRetryTimer = setTimeout(() => {
+    connectRetryTimer = 0;
+    if (state.mp === mp) loadAndConnect(mp);
+  }, delay);
 }
 
 function connectSocket(ioFactory) {
@@ -1550,15 +1913,21 @@ function onConnect(socket) {
   // appear while the join ack is still on its way.
   clearTimeout(wakeNoticeTimer);
   wakeNoticeTimer = 0;
+  const intent = state.mp.intent;
+  const isJoin = intent !== null && intent.type === 'join';
   // With a timeout, a server that never answers still ends in a clear message.
-  socket.timeout(MP_CONSTANTS.joinAckTimeoutMs).emit('room:join', {}, (error, ack) => {
-    if (!isCurrentSocket(socket)) return;
-    if (error) {
-      leaveMultiplayer('UNREACHABLE');
-      return;
-    }
-    onJoinAck(ack);
-  });
+  socket.timeout(MP_CONSTANTS.joinAckTimeoutMs).emit(
+    isJoin ? 'room:join' : 'room:create',
+    isJoin ? { code: intent.code } : {},
+    (error, ack) => {
+      if (!isCurrentSocket(socket)) return;
+      if (error) {
+        leaveMultiplayer('UNREACHABLE');
+        return;
+      }
+      onEntryAck(ack);
+    },
+  );
 }
 
 /**
@@ -1590,7 +1959,8 @@ function onDisconnect(socket) {
   if (isCurrentSocket(socket)) leaveMultiplayer(mpDisconnectCode || 'DISCONNECTED');
 }
 
-function onJoinAck(raw) {
+/** The room:create or room:join answer. */
+function onEntryAck(raw) {
   // Connected: no waking notice or connect retry may follow, whatever the answer.
   clearConnectTimers();
   const ack = validateJoinAck(raw);
@@ -1598,41 +1968,186 @@ function onJoinAck(raw) {
     leaveMultiplayer('BAD_RESPONSE'); // generic message
     return;
   }
+  if (state.phase !== 'connecting') return;
+  const mp = state.mp;
+  const intent = mp.intent || { type: 'create' };
+  const isJoin = intent.type === 'join';
+
   if (!ack.ok) {
-    leaveMultiplayer(ack.error.code);
+    // A wrong, full or busy room is the user's to fix: back to the menu with
+    // the code kept. Anything else ends multiplayer, as before.
+    const code = ack.error.code;
+    // An invite to a room that does not exist (or a malformed one) is dead:
+    // drop it from the address bar, or leaving multiplayer would offer it
+    // again. A full or busy room, or a network error, may work later: kept.
+    if (isJoin && (code === 'ROOM_NOT_FOUND' || code === 'BAD_CODE') &&
+        parseRoomHash(window.location.hash) === intent.code) {
+      replaceHash(null);
+      inviteCode = null;
+    }
+    const field = menuFieldFor(code, intent.type);
+    if (field === null) leaveMultiplayer(code);
+    else returnToMenu({ code, field, codeDraft: isJoin ? intent.code : '' });
     return;
   }
-  if (state.phase !== 'connecting') return;
 
-  state.mp.session.playerId = ack.playerId;
-  state.mp.session.room = ack.room;
+  const room = ack.room;
+  mp.session.playerId = ack.playerId;
+  mp.session.room = room;
   state.phase = 'waiting';
-  renderPhase();
-  renderTimer();
-  renderRacePanel();
-  renderRaceTracks();
-  // Delayed, so a race:countdown arriving right behind it replaces this
-  // message; the countdown then carries the rule (see onRaceCountdown).
-  const session = state.mp.session;
-  announceSoon('Connected. Waiting for an opponent. When the race starts, type the passage and fix every mistake to finish.',
-    () => { session.instructionsSpoken = true; });
+  inviteCode = null; // used
+  setLobbyDeadline(room);
+  replaceHash(room.code);
+  renderAll();
+
+  // Delayed, so the focus move settles first. The race rule is not in these:
+  // it is said at the first countdown (onRaceCountdown).
+  const spelled = spellRoomCode(room.code);
+  if (isJoin) {
+    dom.raceTitle.focus();
+    announceSoon(`Joined room ${spelled}. ` + (room.phase === 'finished'
+      ? 'The others are on their results. You will race in the next one.'
+      : 'Waiting for the host to start the race.'));
+  } else {
+    dom.copyLinkBtn.focus();
+    announceSoon(`Room ${spelled} created. Share the invite link. You can start the race when another player joins.`);
+  }
+}
+
+/**
+ * Back to the menu in multiplayer: a create or join error (shown inline, the
+ * code kept in the input), or Leave room. The socket is closed; the script
+ * stays loaded, so the next attempt is fast.
+ */
+function returnToMenu({ code = null, field = null, codeDraft = '' } = {}) {
+  teardownSocket();
+  stopRaceTimers();
+  state = createRaceState(newSession());
+  state.mp.menuError = code ? { code, field } : null;
+  state.mp.codeDraft = codeDraft || '';
+  renderAll();
+  renderMenuInput();
+  // The input's aria-describedby includes the error, so focus reads it.
+  if (field === 'join') dom.roomCodeInput.focus();
+  else if (field === 'create') dom.createRoomBtn.focus();
+}
+
+function leaveRoom() {
+  if (state.mode !== 'multi' || state.phase !== 'waiting') return;
+  returnToMenu();
+  replaceHash(null);
+  dom.createRoomBtn.focus();
+  announceSoon('You left the room.');
+}
+
+/**
+ * The lobby deadline from a snapshot's expiresInMs. A snapshot that leaves
+ * the deadline where it was (a leave, a ready change: only latency apart)
+ * keeps the warning as it is; a later one (join, Stay in room, back to
+ * waiting) hides it and schedules a new one; a clearly earlier one (this
+ * device slept and its clock fell behind) corrects it so the warning is not
+ * late. Returns true only when it hid a showing warning because the room
+ * stays open longer, so the caller can say so; never when the room left
+ * waiting (next === null), which has its own announcement.
+ */
+function setLobbyDeadline(room) {
+  const mp = state.mp;
+  const next = room.expiresInMs === null ? null : performance.now() + room.expiresInMs;
+  if (next !== null && mp.lobbyDeadline !== null) {
+    const shift = next - mp.lobbyDeadline;
+    // Snapshots of one deadline differ by latency either way; within the
+    // warning's own safety margin that is jitter, which must never hide and
+    // repeat the warning.
+    if (Math.abs(shift) < MP_CONSTANTS.lobbyWarningMarginMs) return false;
+    if (shift < 0) {
+      // Earlier: the warning (shown or not) stays as it is, only sooner.
+      mp.lobbyDeadline = next;
+      scheduleLobbyWarning(); // fires now if already due
+      return false;
+    }
+  }
+  const hidesWarning = mp.lobbyWarned;
+  mp.lobbyDeadline = next;
+  mp.lobbyWarned = false;
+  scheduleLobbyWarning();
+  // Stay in room is about to be hidden; focus on it would fall to <body>.
+  if (hidesWarning && document.activeElement === dom.extendBtn) dom.raceTitle.focus();
+  return hidesWarning && next !== null;
+}
+
+/** Warns ahead of the server closing an idle lobby (WCAG 2.2.1). */
+function scheduleLobbyWarning() {
+  const mp = state.mp;
+  clearLobbyWarnTimer();
+  if (mp.lobbyWarned || mp.lobbyDeadline === null) return;
+  const delay = mp.lobbyDeadline - MP_CONSTANTS.lobbyWarningMs -
+    MP_CONSTANTS.lobbyWarningMarginMs - performance.now();
+  mp.lobbyWarnTimerId = setTimeout(() => {
+    mp.lobbyWarnTimerId = null;
+    if (state.mp !== mp || state.phase !== 'waiting' || mp.lobbyDeadline === null) return;
+    mp.lobbyWarned = true;
+    renderLobby();
+    renderRacePanel();
+    // Repeatable: the live region may still hold this text from the last
+    // warning, which a plain write would not make screen readers read again.
+    announceRepeatable(LOBBY_WARNING);
+  }, Math.max(0, delay));
+}
+
+/**
+ * Background tabs throttle timers, so the warning can be late or not yet
+ * fired. On return, schedule it again from the deadline: it fires now if due.
+ */
+function recheckLobbyWarning() {
+  const mp = state.mp;
+  if (state.mode !== 'multi' || state.phase !== 'waiting' || mp.lobbyWarned || mp.lobbyDeadline === null) return;
+  scheduleLobbyWarning();
 }
 
 /* 12.4 Server events */
 
 function onRoomState(raw) {
   const room = validateRoomState(raw);
-  if (room === null || state.phase === 'connecting') return;
+  if (room === null || state.phase === 'menu' || state.phase === 'connecting') return;
   const mp = state.mp;
+  const selfId = getSelfId();
+  const prev = mp.session.room;
+  const prevCanStart = prev !== null && canStartRace(prev, selfId);
   mp.session.room = room;
+  // A failed start's message belongs to the old snapshot.
+  mp.startStatus = '';
 
-  // Countdown -> waiting: the opponent left before the start.
-  // Finished -> waiting: our rematch with no opponent left (the server sends a
-  // 'finished' snapshot first, then this one).
+  // The host started the next race while this player was still on their
+  // results: they sit it out in the room lobby.
+  if (state.phase === 'finished' && isSittingOut(room, selfId)) {
+    enterSittingOut();
+    return;
+  }
+
+  // The server has this player ready, so it handled their Race again even if
+  // the ack is late, lost or timed out: go to the lobby as the ack would.
+  // Without this the server would seat them in the next race while they sit
+  // on their results. The new state drops a late ack (its `state.mp === mp`
+  // guard).
+  if (state.phase === 'finished' && room.phase === 'finished' && findSelf(room, selfId)?.ready === true) {
+    enterWaiting(rematchBackText());
+    return;
+  }
+  // The same, found only once the host has started: the server seated this
+  // player. race:countdown follows straight away and takes them from the
+  // results card to the countdown (isSeatedForCountdown), so nothing is said
+  // here that would only delay "Race starting".
+  if (state.phase === 'finished' && room.phase === 'countdown' && findSelf(room, selfId)?.inRace === true) {
+    return;
+  }
+
+  // Countdown -> waiting: too few racers were left to start.
+  // Finished -> waiting: normally the rematch ack has already moved this
+  // player to the lobby; this is the fallback.
   if (room.phase === 'waiting' && (state.phase === 'countdown' || state.phase === 'finished')) {
     enterWaiting(state.phase === 'countdown'
-      ? 'Your opponent left. Waiting for a new opponent.'
-      : 'Waiting for a new opponent.');
+      ? 'A player left, so the race was cancelled. Back in the room.'
+      : rematchBackText());
     return;
   }
 
@@ -1653,13 +2168,58 @@ function onRoomState(raw) {
     return;
   }
 
+  // One announcement per snapshot, built from parts in a fixed order.
+  const parts = [];
+  // A player who sat the race out has no race:end, so this snapshot is the
+  // only sign it ended.
+  if (state.phase === 'waiting' && isSittingOut(prev, selfId) &&
+      (room.phase === 'finished' || room.phase === 'waiting')) {
+    parts.push('The race is over.');
+  }
+  if (state.phase === 'waiting' && prev !== null) parts.push(...membershipTexts(prev, room, selfId));
+  // Someone else's join or Stay in room hid the warning. This player's own
+  // Stay in room is said by onExtendAck, so it is not said twice here.
+  if (state.phase === 'waiting' && setLobbyDeadline(room) && room.phase === 'waiting' && !mp.extendRequested) {
+    parts.push('The room stays open.');
+  }
+  if (state.phase === 'running') parts.push(...departureTexts(room));
+  const hostText = hostChangeText(prev, room, selfId, state.phase);
+  if (hostText) parts.push(hostText);
+  if (state.phase === 'waiting' && !hostText && room.hostId === selfId &&
+      !prevCanStart && canStartRace(room, selfId)) {
+    parts.push('You can start the race now.');
+  }
+
+  // Focus never moves for a host change: the new host's Start race appears
+  // in place, and the old host is the one who left.
   if (state.phase === 'finished') {
-    setResultsStatus(rematchStatus(room));
-  } else if (state.phase === 'running') {
-    announceDepartures(room);
+    // Moves "(host)" on the results list (at most a few rows, only then).
+    if (prev !== null && prev.hostId !== room.hostId) renderRaceResults();
+    setResultsStatus(rematchStatus(room), parts.join(' '));
+  } else {
+    announceAfterPending(parts.join(' '));
   }
   renderRacePanel();
   renderRaceTracks();
+  renderLobby();
+}
+
+/** "Player N joined the room." / "Player N left the room." against `prev`. */
+function membershipTexts(prev, room, selfId) {
+  const texts = [];
+  const nowIds = new Set(room.players.map((player) => player.id));
+  const prevIds = new Set(prev.players.map((player) => player.id));
+  for (const player of prev.players) {
+    if (player.id !== selfId && !nowIds.has(player.id)) {
+      texts.push(`${labelFor(player.id, selfId, prev.players)} left the room.`);
+    }
+  }
+  for (const player of room.players) {
+    if (player.id !== selfId && !prevIds.has(player.id)) {
+      texts.push(`${labelFor(player.id, selfId, room.players)} joined the room.`);
+    }
+  }
+  return texts;
 }
 
 /**
@@ -1668,29 +2228,33 @@ function onRoomState(raw) {
  * rematch ack often repeat the same text, which is then not read twice.
  * race:end and room:state arrive back to back, so while "Race over…" is
  * still pending the status joins it: one message, in the right order.
+ * `lead` (a host change) is said first, in the same message.
  */
-function setResultsStatus(next) {
+function setResultsStatus(next, lead = '') {
   const mp = state.mp;
-  if (next === mp.resultsStatus) return;
-  mp.resultsStatus = next;
-  renderRaceResultsStatus();
-  if (!next || next === STATUS_WAITING_NEW_OPPONENT) return;
-  if (resultAnnounceTimer !== 0) announceSoon(`${pendingAnnouncement} ${next}`);
-  else announce(next);
+  const changed = next !== mp.resultsStatus;
+  if (changed) {
+    mp.resultsStatus = next;
+    renderRaceResultsStatus();
+  }
+  const spoken = changed && next !== STATUS_BACK_TO_ROOM ? next : '';
+  announceAfterPending([lead, spoken].filter(Boolean).join(' '));
 }
 
-/** "Your opponent left the race.", once per player per race. */
-function announceDepartures(room) {
+/** "Player N left the race.", once per player per race. */
+function departureTexts(room) {
   const mp = state.mp;
   const selfId = getSelfId();
+  const texts = [];
   for (const player of room.players) {
-    if (player.id === selfId || player.connected || mp.departed[player.id]) continue;
+    if (player.id === selfId || !player.inRace || player.connected || mp.departed[player.id]) continue;
     mp.departed[player.id] = true;
-    announce(`${opponentSubject(labelFor(player.id, selfId, room.players))} left the race.`);
+    texts.push(`${labelFor(player.id, selfId, room.players)} left the race.`);
   }
+  return texts;
 }
 
-/** Back to the race panel with no passage, keeping the session. */
+/** Back to the room lobby view with no passage, keeping the session. */
 function enterWaiting(message) {
   // The typing area and results card are about to be hidden; focus inside them
   // would fall to <body>, so it goes to the race heading instead.
@@ -1698,14 +2262,63 @@ function enterWaiting(message) {
   stopRaceTimers();
   state = createRaceState(state.mp.session);
   state.phase = 'waiting';
+  setLobbyDeadline(state.mp.session.room);
   renderAll();
   if (focusWillBeLost) dom.raceTitle.focus();
   announceSoon(message);
 }
 
+/**
+ * The host started without this player: results card -> room lobby view.
+ * New state, so the rematch warning timer is cleared and a late rematch ack
+ * is dropped by its `state.mp === mp` guard.
+ */
+function enterSittingOut() {
+  const focusWillBeLost = isFocusIn(dom.results) || isFocusIn(dom.typingArea);
+  stopRaceTimers();
+  state = createRaceState(state.mp.session);
+  state.phase = 'waiting';
+  setLobbyDeadline(state.mp.session.room); // null: the room is not waiting
+  renderAll();
+  if (focusWillBeLost) dom.raceTitle.focus();
+  announceSoon(SIT_OUT_MESSAGE);
+}
+
+/**
+ * Race events go to the whole room; a player who sits out ignores them.
+ * race:start, race:update, player:finish and race:end also need the client
+ * phase (countdown or running) that only a seated race:countdown leads to
+ * (see isSeatedForCountdown); this is the second line of defence.
+ */
+function isSatOut() {
+  const room = state.mp.session.room;
+  if (room === null) return false;
+  const selfId = getSelfId();
+  if (isSittingOut(room, selfId)) return true;
+  const self = findSelf(room, selfId);
+  return state.phase === 'waiting' && self !== null && !self.inRace;
+}
+
+/**
+ * A positive seat check: room:state with the countdown always comes first, so
+ * the stored room must be counting down with this player in it. From the
+ * lobby view, a repeated countdown, or the results card: there, inRace means
+ * the server handled a Race again whose ack was lost or late (it clears ready
+ * for every racer at race end, so only a rematch seats them). A player on
+ * their results who was not seated has been moved to the lobby by that
+ * room:state (enterSittingOut).
+ */
+function isSeatedForCountdown() {
+  if (state.phase !== 'waiting' && state.phase !== 'countdown' && state.phase !== 'finished') return false;
+  const room = state.mp.session.room;
+  if (room === null || room.phase !== 'countdown') return false;
+  const self = findSelf(room, getSelfId());
+  return self !== null && self.inRace === true;
+}
+
 function onRaceCountdown(raw) {
   const data = validateCountdown(raw);
-  if (data === null || state.phase === 'connecting' || state.phase === 'running') return;
+  if (data === null || !isSeatedForCountdown()) return;
 
   stopRaceTimers();
   state = createRaceState(state.mp.session, data);
@@ -1722,20 +2335,20 @@ function onRaceCountdown(raw) {
   const start = seconds > 0
     ? `Race starting in ${seconds} second${seconds === 1 ? '' : 's'}.`
     : 'Race starting.';
-  // A second joiner's join message was cancelled by this countdown, so the
-  // rule is said here instead, once per session.
+  // The rule is said at the first countdown of the session. It is marked as
+  // spoken only once actually written, so a cancelled message (state replaced
+  // within the delay) leaves it to be said at the next countdown.
   const session = state.mp.session;
   if (session.instructionsSpoken) {
     announceSoon(`${start} Get ready to type.`);
   } else {
-    session.instructionsSpoken = true;
-    announceSoon(`${start} Fix every mistake to finish.`);
+    announceSoon(`${start} Fix every mistake to finish.`, () => { session.instructionsSpoken = true; });
   }
 }
 
 function onRaceStart(raw) {
   const data = validateRaceStart(raw);
-  if (data === null || state.phase !== 'countdown') return;
+  if (data === null || state.phase !== 'countdown' || isSatOut()) return;
 
   state.phase = 'running';
   state.startTime = performance.now();
@@ -1755,7 +2368,7 @@ function milestoneMessage(label, milestone) {
 
 function onRaceUpdate(raw) {
   const data = validateRaceUpdate(raw);
-  if (data === null || state.phase !== 'running') return;
+  if (data === null || state.phase !== 'running' || isSatOut()) return;
   const mp = state.mp;
   const selfId = getSelfId();
 
@@ -1776,7 +2389,7 @@ function onRaceUpdate(raw) {
 
 function onPlayerFinish(raw) {
   const data = validatePlayerFinish(raw);
-  if (data === null || state.phase !== 'running') return;
+  if (data === null || state.phase !== 'running' || isSatOut()) return;
   const mp = state.mp;
   const selfId = getSelfId();
 
@@ -1807,7 +2420,7 @@ function onPlayerFinish(raw) {
 
 function onRaceEnd(raw) {
   const data = validateRaceEnd(raw);
-  if (data === null || state.phase !== 'running') return;
+  if (data === null || state.phase !== 'running' || isSatOut()) return;
   endRace(data.results);
 }
 
@@ -1863,13 +2476,13 @@ function scheduleRematchWarning() {
 }
 
 /**
- * Errors for events without an ack. Only IDLE_TIMEOUT needs handling: the
- * server closes the socket right after it, and that disconnect should say
- * why. Anything else is logged only.
+ * Errors for events without an ack. Only IDLE_TIMEOUT and ROOM_EXPIRED need
+ * handling: the server closes the socket right after them, and that
+ * disconnect should say why. Anything else is logged only.
  */
 function onGameError(raw) {
   const code = raw && typeof raw.code === 'string' ? raw.code.slice(0, 64) : 'UNKNOWN';
-  if (code === 'IDLE_TIMEOUT') {
+  if (code === 'IDLE_TIMEOUT' || code === 'ROOM_EXPIRED') {
     mpDisconnectCode = code;
     return;
   }
@@ -1922,14 +2535,21 @@ function finishRaceLocally() {
   renderRacePanel();
 }
 
-/** Background tabs throttle timers to 1 s or more, so send what is buffered now. */
+/**
+ * Background tabs throttle timers to 1 s or more: send what is buffered on
+ * the way out, and catch up on the lobby warning on the way back.
+ * Registered only when MP_ENABLED.
+ */
 function handleVisibilityChange() {
-  if (document.visibilityState === 'hidden' && state.mode === 'multi' && state.phase === 'running') {
-    flushKeys();
+  if (state.mode !== 'multi') return;
+  if (document.visibilityState === 'hidden') {
+    if (state.phase === 'running') flushKeys();
+  } else {
+    recheckLobbyWarning();
   }
 }
 
-/* 12.6 Rematch, leaving and the mode switch */
+/* 12.6 Rematch, start and Stay in room */
 
 function requestRematch() {
   const mp = state.mp;
@@ -1937,8 +2557,7 @@ function requestRematch() {
 
   mp.rematchRequested = true;
   clearRematchWarnTimer();
-  const hasOpponent = getRoomPlayers().some((player) => player.id !== getSelfId());
-  setResultsStatus(hasOpponent ? 'Waiting for your opponent to race again.' : STATUS_WAITING_NEW_OPPONENT);
+  setResultsStatus(STATUS_BACK_TO_ROOM);
   renderRaceResultsStatus(); // the button changes even when the text does not
 
   const socket = mpSocket;
@@ -1967,9 +2586,191 @@ function onRematchAck(raw) {
     });
     return;
   }
+  // Race again always leads to the room lobby view, whether the room is
+  // still finished or already waiting.
   mp.session.room = ack.room;
-  setResultsStatus(rematchStatus(ack.room));
+  enterWaiting(rematchBackText());
 }
+
+/** Start race (host only, in the lobby view). */
+function requestStart() {
+  const mp = state.mp;
+  const room = mp.session.room;
+  const selfId = getSelfId();
+  if (state.phase !== 'waiting' || room === null || room.hostId !== selfId || mpSocket === null) return;
+  // The button is aria-disabled, not disabled, so a press lands here: say why.
+  if (!canStartRace(room, selfId)) {
+    announceRepeatable(startHint(room, selfId) || errorMessage('NOT_ENOUGH_PLAYERS'));
+    return;
+  }
+  if (mp.startRequested) return;
+
+  mp.startRequested = true;
+  mp.startStatus = '';
+  renderLobby();
+  renderRacePanel();
+  const socket = mpSocket;
+  socket.timeout(MP_CONSTANTS.ackTimeoutMs).emit('room:start', {}, (error, ack) => {
+    if (!isCurrentSocket(socket) || state.mp !== mp) return;
+    onStartAck(error ? null : ack);
+  });
+}
+
+/** Success needs nothing here: race:countdown follows and replaces `state`. */
+function onStartAck(raw) {
+  const ack = validateStartAck(raw);
+  if (ack !== null && ack.ok) return;
+  const mp = state.mp;
+  mp.startRequested = false;
+  // A timeout or a bad ack gets the generic message.
+  mp.startStatus = errorMessage(ack === null ? 'BAD_RESPONSE' : ack.error.code);
+  renderLobby();
+  renderRacePanel();
+  announceRepeatable(mp.startStatus);
+}
+
+/** Stay in room, shown with the lobby warning. */
+function requestExtend() {
+  const mp = state.mp;
+  if (state.phase !== 'waiting' || !mp.lobbyWarned || mp.extendRequested || mpSocket === null) return;
+  mp.extendRequested = true;
+  renderLobby();
+  const socket = mpSocket;
+  socket.timeout(MP_CONSTANTS.ackTimeoutMs).emit('room:extend', {}, (error, ack) => {
+    if (!isCurrentSocket(socket) || state.mp !== mp) return;
+    onExtendAck(error ? null : ack);
+  });
+}
+
+function onExtendAck(raw) {
+  const ack = validateRoomAck(raw);
+  const mp = state.mp;
+  mp.extendRequested = false;
+  if (ack === null || !ack.ok) {
+    // The button stays, so the user can try again. startStatus is the
+    // lobby's one line for a failed action.
+    mp.startStatus = errorMessage(ack === null ? 'BAD_RESPONSE' : ack.error.code);
+    renderLobby();
+    renderRacePanel();
+    announceRepeatable(mp.startStatus);
+    return;
+  }
+  mp.session.room = ack.room;
+  mp.startStatus = '';
+  setLobbyDeadline(ack.room); // hides the warning (and moves focus off Stay in room)
+  renderLobby();
+  renderRacePanel();
+  renderRaceTracks();
+  if (ack.room.expiresInMs !== null) {
+    const minutes = Math.round(ack.room.expiresInMs / 60000);
+    announceSoon(`The room stays open for ${minutes} more minute${minutes === 1 ? '' : 's'}.`);
+  }
+}
+
+/* 12.7 Invite links and the menu */
+
+// Shown when the link could not be copied for the user (no clipboard access,
+// or an insecure page): it is selected in the read-only field instead.
+const COPY_FALLBACK_TEXT = "The link is selected. Copy it with your device's copy command.";
+
+function copyInviteLink() {
+  const mp = state.mp;
+  const room = mp && mp.session.room;
+  if (state.phase !== 'waiting' || !room) return;
+  const link = buildShareLink(window.location.href, room.code);
+  if (link === null) return;
+
+  const report = (text) => {
+    mp.copyStatus = text;
+    renderLobby();
+    announceRepeatable(text);
+  };
+  const fallback = () => {
+    if (state.mp !== mp) return;
+    dom.roomLink.focus();
+    if (typeof dom.roomLink.select === 'function') dom.roomLink.select();
+    report(COPY_FALLBACK_TEXT);
+  };
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+  if (!clipboard || typeof clipboard.writeText !== 'function' || !window.isSecureContext) {
+    fallback();
+    return;
+  }
+  try {
+    clipboard.writeText(link).then(() => {
+      if (state.mp === mp) report('Invite link copied.');
+    }, fallback);
+  } catch {
+    fallback();
+  }
+}
+
+/**
+ * Puts the room's invite link in the address bar (or removes it), without
+ * a reload and without firing hashchange. Fails quietly where history is
+ * unavailable.
+ */
+function replaceHash(code) {
+  try {
+    const location = window.location;
+    // '' keeps the path and query and drops the hash.
+    const url = code
+      ? buildShareLink(location.href, code)
+      : (location.pathname || '') + (location.search || '');
+    if (url !== null) window.history.replaceState(null, '', url);
+  } catch {
+    // No history API, or a sandbox that refuses it: the URL just stays as it is.
+  }
+}
+
+/** An invite link pasted into this tab's address bar. Ignored in a room. */
+function handleHashChange() {
+  const code = parseRoomHash(window.location.hash);
+  if (code === null) return;
+  if (state.mode === 'solo') {
+    inviteCode = code;
+    renderInvite();
+  } else if (state.phase === 'menu') {
+    state.mp.codeDraft = code;
+    renderMenuInput();
+  }
+}
+
+function handleJoinSubmit(event) {
+  event.preventDefault();
+  if (state.mode !== 'multi' || state.phase !== 'menu') return;
+  const value = dom.roomCodeInput.value; // user input, read as typed
+  const error = roomCodeInputError(value);
+  if (error) {
+    // Focus stays in the input, so the error is announced instead.
+    state.mp.menuError = { code: 'INPUT', field: 'join', text: error };
+    renderMenu();
+    announceRepeatable(error);
+    return;
+  }
+  connectToRoom({ type: 'join', code: normalizeRoomCode(value) });
+}
+
+function handleInviteJoin() {
+  if (inviteCode === null || state.mode !== 'solo') return;
+  const code = inviteCode;
+  inviteCode = null;
+  startMultiplayer({ announceMenu: false });
+  connectToRoom({ type: 'join', code });
+}
+
+function handleInviteDismiss() {
+  inviteCode = null;
+  replaceHash(null);
+  renderInvite();
+  // The banner that had focus is hidden. A link pasted while solo results
+  // show has no visible input to go to, so focus goes to what is on screen.
+  if (state.mode === 'solo' && state.phase !== 'finished') focusInput();
+  else if (state.phase === 'finished') dom.resultsTitle.focus();
+  else dom.modeButtons[0].focus();
+}
+
+/* 12.8 Leaving and the mode switch */
 
 function teardownSocket() {
   const socket = mpSocket;
@@ -1994,6 +2795,13 @@ function leaveMultiplayer(code) {
   teardownSocket();
   cancelSocketIoLoad();
   stopRaceTimers(); // also the waking notice and connect retry timers
+  if (state.mp.session.room !== null) {
+    replaceHash(null); // the room is gone; an old link must not look current
+  } else {
+    // Never entered a room, so an invite in the address bar was not used: it
+    // survives, and the banner (drawn by restart) matches it again.
+    inviteCode = parseRoomHash(window.location.hash);
+  }
   const duration = loadDuration();
   restart(duration, { message: code ? '' : `Solo mode. New test ready, ${duration} seconds.`, moveFocus });
   mpErrorCode = code || null;

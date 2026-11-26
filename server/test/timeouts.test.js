@@ -8,21 +8,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { setup, sleep, FIXED_PASSAGE } = require('./helpers');
+const { setup, sleep, eventually, FIXED_PASSAGE } = require('./helpers');
 const { createMemoryRoomStore } = require('../src/roomStore');
 const { PASSAGE_WORD_COUNT } = require('../src/constants');
 
 const REMATCH_MS = 150;
 const JOIN_MS = 150;
-
-/** Polls `check` until it returns true, or fails after `timeoutMs`. */
-async function eventually(check, message, timeoutMs = 1000) {
-  const deadline = performance.now() + timeoutMs;
-  while (!check()) {
-    if (performance.now() > deadline) throw new Error(`Timed out: ${message}`);
-    await sleep(5);
-  }
-}
 
 /** Records how many events the client had seen when it was disconnected. */
 function trackDisconnect(client) {
@@ -68,7 +59,7 @@ test('the player who rematched stays connected and sees the room go back to wait
   assert.equal(a.pending('game:error').length, 0);
 });
 
-test('a new player can join after the idle timeout and a countdown starts', async (t) => {
+test('a new player can join after the idle timeout and the host starts a countdown', async (t) => {
   const ctx = await setup(t, { rematchTimeoutMs: REMATCH_MS });
   const [a, b] = await finishedRoom(ctx);
   await a.rematch();
@@ -77,6 +68,7 @@ test('a new player can join after the idle timeout and a countdown starts', asyn
 
   const c = await ctx.joined();
   assert.equal(c.joinAck.room.phase, 'waiting');
+  await ctx.start(a);
   await a.waitFor('race:countdown');
   await c.waitFor('race:countdown');
   await c.waitFor('race:start');
@@ -91,20 +83,23 @@ test('when both players stay idle both are removed and the room is deleted', asy
   await b.waitFor('game:error', (e) => e.code === 'IDLE_TIMEOUT', 1500);
   assert.equal(await a.disconnected, 'io server disconnect');
   assert.equal(await b.disconnected, 'io server disconnect');
-  await eventually(() => store.getRoom('main') === null, 'room deleted');
+  await eventually(() => store.getRoom(ctx.code) === null, 'room deleted');
 });
 
-test('a fresh client after both players went idle gets a new waiting room', async (t) => {
+test('after both players went idle the old code is not found and a fresh create gets a new waiting room', async (t) => {
   const ctx = await setup(t, { rematchTimeoutMs: REMATCH_MS });
   const [a, b] = await finishedRoom(ctx);
   await Promise.all([a.disconnected, b.disconnected]);
+  const oldCode = ctx.code;
 
-  const c = await ctx.joined();
+  const late = await ctx.client();
+  assert.equal((await late.join(oldCode)).error.code, 'ROOM_NOT_FOUND');
+  const c = await ctx.created();
   assert.equal(c.joinAck.room.phase, 'waiting');
   assert.deepEqual(c.joinAck.room.players.map((p) => [p.slot, p.ready]), [[1, true]]);
 });
 
-test('a player who joined the finished room is not removed by the idle timeout', async (t) => {
+test('a player who joined the finished room is not removed by the idle timeout and becomes host', async (t) => {
   const ctx = await setup(t, { rematchTimeoutMs: 300 });
   const [a, b] = await finishedRoom(ctx);
   await b.close();
@@ -115,6 +110,7 @@ test('a player who joined the finished room is not removed by the idle timeout',
   await a.disconnected;
   const state = await c.waitFor('room:state', (s) => s.phase === 'waiting', 1500);
   assert.deepEqual(state.payload.players.map((p) => p.id), [c.playerId]);
+  assert.equal(state.payload.hostId, c.playerId);
   assert.equal(c.socket.connected, true);
   assert.equal(c.pending('game:error').length, 0);
 });
@@ -124,6 +120,7 @@ test('the rematch timer does not fire once both players rematched and the next r
   const [a, b] = await finishedRoom(ctx);
   await a.rematch();
   await b.rematch();
+  await ctx.start(a);
   await a.waitFor('race:countdown');
   await Promise.all([a.waitFor('race:start'), b.waitFor('race:start')]);
   a.drain();
@@ -175,13 +172,12 @@ test('a socket that joins in time is not disconnected by the join timeout', asyn
 
 /* ---------- Failed joins ---------- */
 
-test('a third client gets the ROOM_FULL ack and is then disconnected by the server', async (t) => {
-  const ctx = await setup(t);
-  await ctx.joined();
-  await ctx.joined();
+test('a third client in a two-seat room gets the ROOM_FULL ack and is then disconnected by the server', async (t) => {
+  const ctx = await setup(t, { maxPlayers: 2 });
+  await ctx.lobby(2);
   const c = await ctx.client();
   const gone = trackDisconnect(c);
-  const ack = await c.join();
+  const ack = await c.join(ctx.code);
   assert.equal(ack.error.code, 'ROOM_FULL');
   const { reason } = await gone;
   assert.equal(reason, 'io server disconnect');
@@ -190,11 +186,12 @@ test('a third client gets the ROOM_FULL ack and is then disconnected by the serv
 test('a socket answered ALREADY_JOINED keeps its seat and still races', async (t) => {
   const ctx = await setup(t);
   const a = await ctx.joined();
-  assert.equal((await a.join()).error.code, 'ALREADY_JOINED');
+  assert.equal((await a.join(ctx.code)).error.code, 'ALREADY_JOINED');
   await sleep(50);
   assert.equal(a.socket.connected, true);
 
   const b = await ctx.joined();
+  await ctx.start(a);
   await a.waitFor('race:start');
   await b.waitFor('race:start');
   a.progress(1, FIXED_PASSAGE);
@@ -220,8 +217,8 @@ test('a pickPassage that throws falls back to a valid passage of words', async (
       throw new Error('test: picker broke');
     },
   });
-  const a = await ctx.joined();
-  await ctx.joined();
+  const [a] = await ctx.lobby(2);
+  await ctx.start();
   const countdown = await a.waitFor('race:countdown');
   assertDefaultPassage(countdown.payload.passage);
   await a.waitFor('race:start');
@@ -231,8 +228,8 @@ test('a pickPassage that throws falls back to a valid passage of words', async (
 test('a pickPassage that returns an empty string falls back to a valid passage of words', async (t) => {
   t.mock.method(console, 'error', () => {});
   const ctx = await setup(t, { pickPassage: () => '' });
-  const a = await ctx.joined();
-  await ctx.joined();
+  const [a] = await ctx.lobby(2);
+  await ctx.start();
   const countdown = await a.waitFor('race:countdown');
   assertDefaultPassage(countdown.payload.passage);
   await a.waitFor('race:start');
@@ -241,26 +238,67 @@ test('a pickPassage that returns an empty string falls back to a valid passage o
 
 /* ---------- No leaks ---------- */
 
-test('the process exits after close() with an unjoined socket and a pending rematch timer', async () => {
+test('the process exits after close() with rooms in every phase and an unjoined socket', async () => {
   const appPath = path.join(__dirname, '..', 'src', 'app.js');
+  // Every server timer is 60 s, so a timer left behind keeps the process alive
+  // past the 8 s limit. The second server has a 60 s countdown, so its room is
+  // still counting down when it closes.
   const script = `
     const { createServer } = require(${JSON.stringify(appPath)});
     const { io } = require('socket.io-client');
+    const LONG = 60000;
+    const base = { pickPassage: () => 'ab', raceTimeLimitMs: LONG, rematchTimeoutMs: LONG,
+      lobbyTimeoutMs: LONG, joinTimeoutMs: LONG, createLimit: { capacity: 10, refillPerSec: 0 } };
     (async () => {
-      const server = createServer({ countdownMs: 20, pickPassage: () => 'ab', rematchTimeoutMs: 60000, joinTimeoutMs: 60000 });
-      const port = await server.listen(0);
-      const url = 'http://127.0.0.1:' + port;
-      const mk = () => new Promise((res) => { const s = io(url, { transports: ['websocket'], reconnection: false, forceNew: true }); s.on('connect', () => res(s)); });
-      const a = await mk(); const b = await mk();
+      const fast = createServer({ ...base, countdownMs: 20 });
+      const slow = createServer({ ...base, countdownMs: LONG });
+      const urlOf = async (server) => 'http://127.0.0.1:' + (await server.listen(0));
+      const fastUrl = await urlOf(fast);
+      const slowUrl = await urlOf(slow);
+      const sockets = [];
+      const mk = (url) => new Promise((res) => {
+        const s = io(url, { transports: ['websocket'], reconnection: false, forceNew: true });
+        sockets.push(s);
+        s.on('connect', () => res(s));
+      });
+      const pair = async (url) => {
+        const host = await mk(url); const guest = await mk(url);
+        const created = await host.emitWithAck('room:create', {});
+        if (!created.ok) throw new Error('create failed ' + JSON.stringify(created));
+        const joined = await guest.emitWithAck('room:join', { code: created.room.code });
+        if (!joined.ok) throw new Error('join failed ' + JSON.stringify(joined));
+        return [host, guest];
+      };
+
+      // finished: rematch timer pending.
+      const [a, b] = await pair(fastUrl);
       const ended = new Promise((res) => a.on('race:end', res));
-      const started = new Promise((res) => b.on('race:start', res));
-      await a.emitWithAck('room:join', {}); await b.emitWithAck('room:join', {});
-      await started;
+      const startedAB = new Promise((res) => b.on('race:start', res));
+      await a.emitWithAck('room:start', {});
+      await startedAB;
       a.emit('race:progress', { seq: 1, keys: 'ab' }); b.emit('race:progress', { seq: 1, keys: 'ab' });
       await ended;
-      const idle = await mk();
-      await server.close();
-      for (const s of [a, b, idle]) s.disconnect();
+
+      // racing: race-limit timer and broadcast interval pending.
+      const [c, d] = await pair(fastUrl);
+      const startedCD = new Promise((res) => d.on('race:start', res));
+      await c.emitWithAck('room:start', {});
+      await startedCD;
+
+      // waiting: lobby timer pending.
+      await pair(fastUrl);
+
+      // countdown: countdown timer pending.
+      const [e] = await pair(slowUrl);
+      const counting = await e.emitWithAck('room:start', {});
+      if (!counting.ok) throw new Error('start failed');
+
+      // unjoined: join timer pending.
+      await mk(fastUrl);
+
+      await fast.close();
+      await slow.close();
+      for (const s of sockets) s.disconnect();
       console.log('closed');
     })().catch((err) => { console.error(err); process.exit(2); });
   `;

@@ -188,6 +188,28 @@ test('with one trusted hop, a client-written entry left of the proxy entry does 
   assert.equal(await outcome(ctx.rawClient(viaProxy('203.0.113.9, 203.0.113.1'))), 'refused');
 });
 
+test('with one trusted hop, two forwarded IPv6 addresses in one /64 share a connection slot', async (t) => {
+  const ctx = await setup(t, PROXY_OPTIONS);
+  await ctx.client(viaProxy('2001:db8:1:2::1'));
+  assert.equal(await outcome(ctx.rawClient(viaProxy('2001:db8:1:2::abcd'))), 'refused');
+});
+
+test('with one trusted hop, a forwarded IPv6 address in a different /64 gets its own slot', async (t) => {
+  const ctx = await setup(t, PROXY_OPTIONS);
+  await ctx.client(viaProxy('2001:db8:1:2::1'));
+  assert.equal(await outcome(ctx.rawClient(viaProxy('2001:db8:1:3::1'))), 'connected');
+});
+
+test('with one trusted hop, the /64 slot is freed when its client disconnects', async (t) => {
+  const ctx = await setup(t, PROXY_OPTIONS);
+  const first = await ctx.client(viaProxy('2001:db8:1:2::1'));
+  assert.equal(await outcome(ctx.rawClient(viaProxy('2001:db8:1:2::2'))), 'refused');
+  const closed = serverSideClose(ctx, first);
+  await first.close();
+  await closed;
+  assert.equal(await outcome(ctx.rawClient(viaProxy('2001:db8:1:2::2'))), 'connected');
+});
+
 test('with no trusted hops, a different forwarded address does not dodge the cap', async (t) => {
   const ctx = await setup(t, { maxConnectionsPerIp: 1 });
   await ctx.client(viaProxy('203.0.113.1'));

@@ -10,10 +10,11 @@ const { COUNTDOWN_MS } = require('../src/constants');
 
 const PASSAGE = 'ab cd';
 const START = 10_000;
+const CODE = 'K7QM2X';
 
 /** A room with `count` joined players (socket ids s1, s2, ...). */
 function roomWith(count, { maxPlayers = 2, minPlayers = 2 } = {}) {
-  const room = race.createRoom('main', { maxPlayers, minPlayers });
+  const room = race.createRoom(CODE, { maxPlayers, minPlayers });
   const players = [];
   for (let i = 1; i <= count; i += 1) {
     const result = race.addPlayer(room, { id: `p${i}`, socketId: `s${i}` });
@@ -33,13 +34,51 @@ function racingRoom(count = 2, passage = PASSAGE, limits) {
 
 /* ---------- createRoom and addPlayer ---------- */
 
-test('a new room is waiting with no players and no passage', () => {
-  const room = race.createRoom('main', { maxPlayers: 2, minPlayers: 2 });
-  assert.equal(room.id, 'main');
+test('a new room is keyed by its code and is waiting with no players, host or passage', () => {
+  const room = race.createRoom(CODE, { maxPlayers: 4, minPlayers: 2 });
+  assert.equal(room.id, CODE);
   assert.equal(room.phase, 'waiting');
+  assert.equal(room.maxPlayers, 4);
+  assert.equal(room.minPlayers, 2);
   assert.deepEqual(room.players, []);
+  assert.equal(room.hostId, null);
+  assert.equal(room.lobbyDeadline, null);
+  assert.equal(room.nextJoinSeq, 1);
   assert.equal(room.passage, null);
   assert.equal(room.startAt, null);
+});
+
+test('the first player to join becomes the host', () => {
+  const { room } = roomWith(2);
+  assert.equal(room.hostId, 'p1');
+  assert.equal(race.isHost(room, 'p1'), true);
+  assert.equal(race.isHost(room, 'p2'), false);
+});
+
+test('isHost is false for every id while the room has no host', () => {
+  const room = race.createRoom(CODE, { maxPlayers: 4, minPlayers: 2 });
+  assert.equal(race.isHost(room, null), false);
+  assert.equal(race.isHost(room, 'p1'), false);
+});
+
+test('new players join with inRace false and joinSeq 1, 2, 3', () => {
+  const { players } = roomWith(3, { maxPlayers: 4 });
+  assert.deepEqual(players.map((p) => p.joinSeq), [1, 2, 3]);
+  assert.ok(players.every((p) => p.inRace === false && p.ready === true));
+});
+
+test('joinSeq is never reused after a player leaves', () => {
+  const { room } = roomWith(3, { maxPlayers: 4 });
+  race.removePlayer(room, 's2', 0);
+  const added = race.addPlayer(room, { id: 'p4', socketId: 's4' });
+  assert.equal(added.player.joinSeq, 4);
+  assert.equal(added.player.slot, 2, 'the freed slot is reused');
+  assert.equal(room.nextJoinSeq, 5);
+});
+
+test('ROOM_FULL is checked before RACE_IN_PROGRESS', () => {
+  const { room } = racingRoom(2, PASSAGE, { maxPlayers: 2, minPlayers: 2 });
+  assert.deepEqual(race.addPlayer(room, { id: 'p3', socketId: 's3' }), { ok: false, code: 'ROOM_FULL' });
 });
 
 test('joining players get slots 1 and 2 and start ready and connected', () => {
@@ -140,49 +179,141 @@ test('setReady marks a player ready and refuses an unknown socket', () => {
   assert.deepEqual(race.setReady(room, 'nope'), { ok: false, code: 'NOT_IN_ROOM' });
 });
 
-/* ---------- shouldStartCountdown ---------- */
+/* ---------- reassignHost ---------- */
 
-test('two ready players in waiting start a countdown', () => {
+test('the host passes by join order, not slot, when a later joiner took a freed lower slot', () => {
+  // A (slot 1, seq 1), B (slot 2, seq 2), C (slot 3, seq 3); B leaves; D takes slot 2 (seq 4); A leaves.
+  const { room } = roomWith(3, { maxPlayers: 4 });
+  race.removePlayer(room, 's2', 0);
+  const d = race.addPlayer(room, { id: 'p4', socketId: 's4' }).player;
+  assert.equal(d.slot, 2);
+  race.removePlayer(room, 's1', 0);
+  assert.equal(room.hostId, 'p3', 'C joined before D');
+});
+
+test('reassignHost returns false and keeps the host while the host is still connected', () => {
   const { room } = roomWith(2);
-  assert.equal(race.shouldStartCountdown(room), 'countdown');
+  assert.equal(race.reassignHost(room), false);
+  assert.equal(room.hostId, 'p1');
 });
 
-test('one ready player in waiting stays waiting', () => {
+test('reassignHost skips a disconnected racer and returns true when the host changes', () => {
+  const { room, players } = racingRoom(3, PASSAGE, { maxPlayers: 4, minPlayers: 2 });
+  players[1].connected = false; // p2 left mid-race
+  players[0].connected = false; // the host left mid-race
+  assert.equal(race.reassignHost(room), true);
+  assert.equal(room.hostId, 'p3');
+});
+
+test('a host leaving mid-race passes the host at once to the earliest-joined connected player', () => {
+  const { room } = racingRoom(3, PASSAGE, { maxPlayers: 4, minPlayers: 2 });
+  race.removePlayer(room, 's1', START + 100);
+  assert.equal(room.hostId, 'p2');
+});
+
+test('reassignHost gives null when no connected player is left', () => {
+  const { room } = racingRoom(2);
+  race.removePlayer(room, 's1', START + 100);
+  race.removePlayer(room, 's2', START + 100);
+  assert.equal(room.hostId, null);
+});
+
+test('removing the last player of a waiting room leaves no host', () => {
   const { room } = roomWith(1);
-  assert.equal(race.shouldStartCountdown(room), null);
+  race.removePlayer(room, 's1', 0);
+  assert.equal(room.hostId, null);
 });
 
-test('one ready player in finished moves the room to waiting', () => {
+/* ---------- shouldReturnToWaiting ---------- */
+
+test('a finished room where every player is ready returns to waiting, even with one player', () => {
   const { room } = roomWith(1);
   room.phase = 'finished';
-  assert.equal(race.shouldStartCountdown(room), 'waiting');
+  assert.equal(race.shouldReturnToWaiting(room), true);
 });
 
-test('two players with one not ready in finished stay finished', () => {
+test('a finished room with two ready players returns to waiting and never to a countdown', () => {
+  const { room } = roomWith(2);
+  room.phase = 'finished';
+  assert.equal(race.shouldReturnToWaiting(room), true);
+});
+
+test('a finished room with one player not ready stays finished', () => {
   const { room, players } = roomWith(2);
   room.phase = 'finished';
   players[1].ready = false;
-  assert.equal(race.shouldStartCountdown(room), null);
+  assert.equal(race.shouldReturnToWaiting(room), false);
 });
 
-test('two ready players in finished start a rematch countdown', () => {
+test('the return check does nothing in waiting, countdown or racing', () => {
   const { room } = roomWith(2);
-  room.phase = 'finished';
-  assert.equal(race.shouldStartCountdown(room), 'countdown');
+  for (const phase of ['waiting', 'countdown', 'racing']) {
+    room.phase = phase;
+    assert.equal(race.shouldReturnToWaiting(room), false, phase);
+  }
 });
 
-test('the start check does nothing during a countdown or a race', () => {
+test('an empty finished room does not return to waiting', () => {
+  const room = race.createRoom(CODE, { maxPlayers: 2, minPlayers: 2 });
+  room.phase = 'finished';
+  assert.equal(race.shouldReturnToWaiting(room), false);
+});
+
+/* ---------- canStart ---------- */
+
+test('canStart: a non-host is refused with NOT_HOST even while racing', () => {
+  const { room } = racingRoom(2);
+  assert.deepEqual(race.canStart(room, 'p2'), { ok: false, code: 'NOT_HOST' });
+});
+
+test('canStart: the host during a countdown gets RACE_IN_PROGRESS', () => {
   const { room } = roomWith(2);
-  room.phase = 'countdown';
-  assert.equal(race.shouldStartCountdown(room), null);
-  room.phase = 'racing';
-  assert.equal(race.shouldStartCountdown(room), null);
+  race.beginCountdown(room, PASSAGE, 0, 3000);
+  assert.deepEqual(race.canStart(room, 'p1'), { ok: false, code: 'RACE_IN_PROGRESS' });
 });
 
-test('an empty finished room does not move to waiting', () => {
-  const room = race.createRoom('main', { maxPlayers: 2, minPlayers: 2 });
+test('canStart: the host during a race gets RACE_IN_PROGRESS', () => {
+  const { room } = racingRoom(2);
+  assert.deepEqual(race.canStart(room, 'p1'), { ok: false, code: 'RACE_IN_PROGRESS' });
+});
+
+test('canStart: the host alone in waiting gets NOT_ENOUGH_PLAYERS', () => {
+  const { room } = roomWith(1);
+  assert.deepEqual(race.canStart(room, 'p1'), { ok: false, code: 'NOT_ENOUGH_PLAYERS' });
+});
+
+test('canStart: the host alone in finished gets NOT_ENOUGH_PLAYERS', () => {
+  const { room } = roomWith(1);
   room.phase = 'finished';
-  assert.equal(race.shouldStartCountdown(room), null);
+  assert.deepEqual(race.canStart(room, 'p1'), { ok: false, code: 'NOT_ENOUGH_PLAYERS' });
+});
+
+test('canStart: finished with three players and only the host ready gets PLAYERS_NOT_READY', () => {
+  const { room, players } = roomWith(3, { maxPlayers: 4 });
+  room.phase = 'finished';
+  players[1].ready = false;
+  players[2].ready = false;
+  assert.deepEqual(race.canStart(room, 'p1'), { ok: false, code: 'PLAYERS_NOT_READY' });
+});
+
+test('canStart: finished with the host not ready and B ready is ok because the host counts', () => {
+  const { room, players } = roomWith(3, { maxPlayers: 4 });
+  room.phase = 'finished';
+  players[0].ready = false;
+  players[2].ready = false;
+  assert.deepEqual(race.canStart(room, 'p1'), { ok: true });
+});
+
+test('canStart: finished with the host and B ready and C not ready is ok', () => {
+  const { room, players } = roomWith(3, { maxPlayers: 4 });
+  room.phase = 'finished';
+  players[2].ready = false;
+  assert.deepEqual(race.canStart(room, 'p1'), { ok: true });
+});
+
+test('canStart: the host with two players in waiting is ok', () => {
+  const { room } = roomWith(2);
+  assert.deepEqual(race.canStart(room, 'p1'), { ok: true });
 });
 
 /* ---------- Countdown and race start ---------- */
@@ -196,12 +327,15 @@ test('beginCountdown sets the passage and a provisional start after the default 
   assert.equal(room.finishCount, 0);
 });
 
-test('beginCountdown resets every race field left over from the previous race', () => {
+test('beginCountdown resets every race field left over from the previous race for every racer', () => {
   const { room, players } = racingRoom();
   race.applyKeys(room, players[0], 'ab cd', START + 100);
   race.applyKeys(room, players[1], 'x', START + 100);
   players[1].lastSeq = 7;
   race.endRace(room);
+  // Both pressed "Race again", so both race (M2 seating rule).
+  race.setReady(room, 's1');
+  race.setReady(room, 's2');
   race.beginCountdown(room, 'xyz', START + 5000, 50);
   assert.equal(room.finishCount, 0);
   for (const player of players) {
@@ -218,13 +352,77 @@ test('beginCountdown resets every race field left over from the previous race', 
   }
 });
 
-test('cancelCountdown returns the room to waiting and drops the passage', () => {
-  const { room } = roomWith(2);
+test('beginCountdown from waiting seats every player', () => {
+  const { room, players } = roomWith(3, { maxPlayers: 4 });
+  race.beginCountdown(room, PASSAGE, 0, 3000);
+  assert.deepEqual(players.map((p) => [p.inRace, p.ready]), [
+    [true, true],
+    [true, true],
+    [true, true],
+  ]);
+});
+
+test('beginCountdown from finished seats the ready players and the host, and makes everyone ready', () => {
+  const { room, players } = racingRoom(3, PASSAGE, { maxPlayers: 4, minPlayers: 2 });
+  for (const p of players) race.applyKeys(room, p, 'ab', START + 100);
+  race.endRace(room);
+  race.setReady(room, 's1'); // host ready
+  race.setReady(room, 's2'); // B ready; C not
+  race.beginCountdown(room, 'xyz', START + 5000, 50);
+  assert.deepEqual(players.map((p) => [p.id, p.inRace, p.ready]), [
+    ['p1', true, true],
+    ['p2', true, true],
+    ['p3', false, true],
+  ]);
+  // Only racers get fresh race fields; C keeps the old numbers but never races.
+  assert.deepEqual(players[0].results, [null, null, null]);
+  assert.deepEqual(players[1].results, [null, null, null]);
+  assert.equal(players[2].index, 2);
+});
+
+test('beginCountdown seats a host who has not pressed Race again', () => {
+  const { room, players } = racingRoom(3, PASSAGE, { maxPlayers: 4, minPlayers: 2 });
+  race.endRace(room);
+  race.setReady(room, 's2');
+  race.beginCountdown(room, PASSAGE, START + 5000, 50);
+  assert.deepEqual(players.map((p) => p.inRace), [true, true, false]);
+});
+
+test('cancelCountdown returns the room to waiting, drops the passage and unseats everyone', () => {
+  const { room, players } = roomWith(2);
   race.beginCountdown(room, PASSAGE, 0, 3000);
   race.cancelCountdown(room);
   assert.equal(room.phase, 'waiting');
   assert.equal(room.passage, null);
   assert.equal(room.startAt, null);
+  assert.ok(players.every((p) => p.inRace === false && p.ready === true));
+});
+
+test('markWaiting sets every inRace false and every ready true', () => {
+  const { room, players } = racingRoom(2);
+  race.endRace(room);
+  race.markWaiting(room);
+  assert.equal(room.phase, 'waiting');
+  assert.ok(players.every((p) => p.inRace === false && p.ready === true));
+});
+
+test('abandonRace returns to waiting, removes disconnected players and passes the host', () => {
+  const { room } = racingRoom(2, PASSAGE, { maxPlayers: 4, minPlayers: 2 });
+  race.endRace(room);
+  race.addPlayer(room, { id: 'p3', socketId: 's3' }); // joins on results
+  race.setReady(room, 's1');
+  race.beginCountdown(room, PASSAGE, START, 0); // p1, p3 race; p2 sits out
+  race.beginRace(room, START);
+  race.removePlayer(room, 's1', START + 100);
+  race.removePlayer(room, 's3', START + 100);
+  assert.equal(race.hasConnectedRacer(room), false);
+  race.abandonRace(room);
+  assert.equal(room.phase, 'waiting');
+  assert.equal(room.passage, null);
+  assert.equal(room.startAt, null);
+  assert.equal(room.finishCount, 0);
+  assert.deepEqual(room.players.map((p) => [p.id, p.inRace, p.ready]), [['p2', false, true]]);
+  assert.equal(room.hostId, 'p2');
 });
 
 test('beginRace resets startAt to the moment the countdown timer actually fired', () => {
@@ -350,6 +548,93 @@ test('two players finishing at the same millisecond get places 1 and 2 in proces
   assert.equal(players[0].place, 2);
   const results = race.buildResults(room, START + 700);
   assert.deepEqual(results.map((r) => [r.id, r.place]), [['p2', 1], ['p1', 2]]);
+});
+
+/* ---------- Sitting out (M2) ---------- */
+
+/** Racing room: p1 (host) and p2 race, p3 sits out (it did not press Race again). */
+function roomWithSitOut() {
+  const { room, players } = racingRoom(3, PASSAGE, { maxPlayers: 4, minPlayers: 2 });
+  race.endRace(room);
+  race.setReady(room, 's1');
+  race.setReady(room, 's2');
+  race.beginCountdown(room, PASSAGE, START - 50, 50);
+  race.beginRace(room, START);
+  return { room, players };
+}
+
+test('racers lists only players with inRace', () => {
+  const { room } = roomWithSitOut();
+  assert.deepEqual(race.racers(room).map((p) => p.id), ['p1', 'p2']);
+});
+
+test('a racer leaving mid-race stays as disconnected while a sitting-out player is removed', () => {
+  const { room, players } = roomWithSitOut();
+  const racer = race.removePlayer(room, 's2', START + 100);
+  assert.equal(racer.removed, false);
+  assert.equal(players[1].connected, false);
+  const sitter = race.removePlayer(room, 's3', START + 100);
+  assert.equal(sitter.removed, true);
+  assert.deepEqual(room.players.map((p) => p.id), ['p1', 'p2']);
+});
+
+test('applyKeys changes nothing for a sitting-out player, even the whole passage', () => {
+  const { room, players } = roomWithSitOut();
+  assert.deepEqual(race.applyKeys(room, players[2], PASSAGE, START + 100), { changed: false, finished: false });
+  assert.equal(players[2].finishedAt, null);
+  assert.equal(room.finishCount, 0);
+  assert.equal(room.dirty, false);
+});
+
+test('the race is over when both racers finished even though a sitting-out player is connected', () => {
+  const { room, players } = roomWithSitOut();
+  race.applyKeys(room, players[0], PASSAGE, START + 100);
+  race.applyKeys(room, players[1], PASSAGE, START + 200);
+  assert.equal(race.isRaceOver(room), true);
+});
+
+test('the race is not over while a racer has not finished', () => {
+  const { room, players } = roomWithSitOut();
+  race.applyKeys(room, players[0], PASSAGE, START + 100);
+  assert.equal(race.isRaceOver(room), false);
+});
+
+test('the race is not over and hasConnectedRacer is false when only a sitting-out player is connected', () => {
+  const { room } = roomWithSitOut();
+  race.removePlayer(room, 's1', START + 100);
+  race.removePlayer(room, 's2', START + 100);
+  assert.equal(race.isRaceOver(room), false);
+  assert.equal(race.hasConnectedRacer(room), false);
+});
+
+test('hasConnectedRacer is true while one racer is connected', () => {
+  const { room } = roomWithSitOut();
+  race.removePlayer(room, 's1', START + 100);
+  assert.equal(race.hasConnectedRacer(room), true);
+});
+
+test('buildResults and buildProgress exclude sitting-out players', () => {
+  const { room } = roomWithSitOut();
+  assert.deepEqual(race.buildResults(room, START + 500).map((r) => r.id).sort(), ['p1', 'p2']);
+  assert.deepEqual(race.buildProgress(room, START + 500).players.map((p) => p.id), ['p1', 'p2']);
+});
+
+test('endRace sets racers not ready and leaves sitting-out players ready', () => {
+  const { room, players } = roomWithSitOut();
+  race.endRace(room);
+  assert.deepEqual(players.map((p) => [p.id, p.ready]), [
+    ['p1', false],
+    ['p2', false],
+    ['p3', true],
+  ]);
+});
+
+test('endRace passes the host when the host left during the race', () => {
+  const { room } = roomWithSitOut();
+  race.removePlayer(room, 's1', START + 100);
+  race.endRace(room);
+  assert.deepEqual(room.players.map((p) => p.id), ['p2', 'p3']);
+  assert.equal(room.hostId, 'p2');
 });
 
 /* ---------- isRaceOver ---------- */
@@ -521,18 +806,69 @@ test('endRace sets finished, drops disconnected players and clears ready', () =>
   assert.equal(room.dirty, false);
 });
 
-test('a snapshot lists players by slot and never includes socket ids', () => {
+test('a snapshot lists players by slot with code, host and lobby time, and never socket ids or joinSeq', () => {
   const { room } = roomWith(2);
   race.removePlayer(room, 's1', 0);
   race.addPlayer(room, { id: 'p3', socketId: 's3' });
-  const snapshot = race.toSnapshot(room);
+  room.lobbyDeadline = 5000;
+  const snapshot = race.toSnapshot(room, 2000);
   assert.deepEqual(snapshot, {
+    code: CODE,
     phase: 'waiting',
     maxPlayers: 2,
+    minPlayers: 2,
+    hostId: 'p2',
+    expiresInMs: 3000,
     players: [
-      { id: 'p3', slot: 1, connected: true, ready: true, finished: false },
-      { id: 'p2', slot: 2, connected: true, ready: true, finished: false },
+      { id: 'p3', slot: 1, connected: true, ready: true, inRace: false, finished: false },
+      { id: 'p2', slot: 2, connected: true, ready: true, inRace: false, finished: false },
     ],
   });
-  assert.ok(!JSON.stringify(snapshot).includes('s3'));
+  const text = JSON.stringify(snapshot);
+  assert.ok(!text.includes('s3') && !text.includes('s2'));
+  assert.ok(!text.includes('joinSeq') && !text.includes('socketId') && !text.includes('lobbyDeadline'));
+});
+
+test('a snapshot has expiresInMs null outside waiting and inRace true for racers', () => {
+  const { room } = roomWith(2);
+  room.lobbyDeadline = 5000;
+  race.beginCountdown(room, PASSAGE, 0, 3000);
+  const snapshot = race.toSnapshot(room, 2000);
+  assert.equal(snapshot.phase, 'countdown');
+  assert.equal(snapshot.expiresInMs, null);
+  assert.ok(snapshot.players.every((p) => p.inRace === true));
+});
+
+test('a snapshot shows finished false for a sat-out player who finished the previous race', () => {
+  const { room, players } = racingRoom(3, PASSAGE, { maxPlayers: 4, minPlayers: 2 });
+  race.applyKeys(room, players[2], PASSAGE, START + 100);
+  race.endRace(room);
+  race.setReady(room, 's1');
+  race.setReady(room, 's2');
+  race.beginCountdown(room, PASSAGE, START + 5000, 50); // p3 sits out
+  const p3 = race.toSnapshot(room, START + 5000).players.find((p) => p.id === 'p3');
+  assert.equal(players[2].finishedAt, START + 100, 'the old finish is still stored');
+  assert.equal(p3.inRace, false);
+  assert.equal(p3.finished, false);
+});
+
+test('a snapshot shows finished true for a racer who finished, and false for everyone in waiting', () => {
+  const { room, players } = racingRoom(2);
+  race.applyKeys(room, players[0], PASSAGE, START + 100);
+  assert.equal(race.toSnapshot(room, START + 100).players[0].finished, true);
+  race.endRace(room);
+  assert.equal(race.toSnapshot(room, START + 200).players[0].finished, true, 'results still show the finish');
+  race.markWaiting(room);
+  assert.ok(race.toSnapshot(room, START + 300).players.every((p) => p.finished === false));
+});
+
+test('a snapshot never reports negative lobby time', () => {
+  const { room } = roomWith(1);
+  room.lobbyDeadline = 1000;
+  assert.equal(race.toSnapshot(room, 5000).expiresInMs, 0);
+});
+
+test('a waiting snapshot without a lobby deadline has expiresInMs null', () => {
+  const { room } = roomWith(1);
+  assert.equal(race.toSnapshot(room, 0).expiresInMs, null);
 });

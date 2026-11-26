@@ -31,6 +31,19 @@ test('clear removes every room', () => {
   assert.equal(store.getRoom('b'), null);
 });
 
+test('size counts the live rooms', () => {
+  const store = createMemoryRoomStore();
+  assert.equal(store.size(), 0);
+  store.saveRoom({ id: 'AAAAAA' });
+  store.saveRoom({ id: 'BBBBBB' });
+  store.saveRoom({ id: 'AAAAAA' });
+  assert.equal(store.size(), 2);
+  store.deleteRoom('AAAAAA');
+  assert.equal(store.size(), 1);
+  store.clear();
+  assert.equal(store.size(), 0);
+});
+
 test('two stores do not share rooms', () => {
   const one = createMemoryRoomStore();
   const two = createMemoryRoomStore();

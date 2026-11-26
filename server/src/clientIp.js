@@ -44,4 +44,38 @@ function getClientIp(remoteAddress, forwardedFor, trustProxyHops) {
   return normalizeIp(candidate) ?? peer;
 }
 
-module.exports = { getClientIp, normalizeIp };
+/** Eight 16-bit groups of a valid IPv6 address (zone id already removed). */
+function expandIpv6(ip) {
+  let text = ip;
+  // An embedded IPv4 tail (e.g. 64:ff9b::1.2.3.4) is two hextets.
+  const lastColon = text.lastIndexOf(':');
+  const tail = text.slice(lastColon + 1);
+  if (net.isIPv4(tail)) {
+    const [a, b, c, d] = tail.split('.').map(Number);
+    text = `${text.slice(0, lastColon + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = text.split('::');
+  const head = halves[0] === '' ? [] : halves[0].split(':');
+  const rest = halves.length > 1 && halves[1] !== '' ? halves[1].split(':') : [];
+  const zeros = new Array(8 - head.length - rest.length).fill('0');
+  return [...head, ...zeros, ...rest].map((group) => parseInt(group, 16));
+}
+
+/**
+ * The key for every per-IP limit (connection cap, create and join-failure
+ * limiters). One host is usually given a whole IPv6 /64, so keying on the
+ * full address would hand it billions of "IPs"; IPv6 is therefore cut to its
+ * /64 prefix, written as the first four hextets in lowercase minimal form
+ * plus "::/64" (2001:db8:1:2::/64). The prefix is never compressed further,
+ * so ::1 becomes 0:0:0:0::/64. IPv4, 'unknown' and anything that is not an
+ * IP come back unchanged.
+ */
+function limiterKey(ip) {
+  if (typeof ip !== 'string') return ip;
+  const normal = normalizeIp(ip.split('%')[0]);
+  if (normal === null || net.isIPv4(normal)) return normal ?? ip;
+  const prefix = expandIpv6(normal).slice(0, 4).map((group) => group.toString(16));
+  return `${prefix.join(':')}::/64`;
+}
+
+module.exports = { getClientIp, normalizeIp, limiterKey };

@@ -5,7 +5,14 @@
    game.js owns sockets and timers; this file owns the rules.
 
    Lifecycle (PROTOCOL.md section 3): waiting -> countdown -> racing -> finished,
-   then finished -> countdown (rematch) or finished -> waiting. */
+   then finished -> countdown (host start with the ready players) or
+   finished -> waiting (everyone ready). Also countdown -> waiting (too few
+   racers) and racing -> waiting (every racer gone, sat-out players remain).
+
+   Per player: `joinSeq` (host succession order, never reused), `ready`
+   (in the lobby for the next race) and `inRace` (in the current or last race).
+   A player with inRace false during countdown/racing is sitting out and
+   never affects the race. */
 
 const { computeStats } = require('./shared');
 const { BACKSPACE, ERROR_CODES } = require('./constants');
@@ -18,13 +25,17 @@ const MIN_STATS_ELAPSED_MS = 1000;
 
 /* ---------- Creation and membership ---------- */
 
-function createRoom(id, { maxPlayers, minPlayers }) {
+/** `code` is the room code; it doubles as the store key and Socket.io room name. */
+function createRoom(code, { maxPlayers, minPlayers }) {
   return {
-    id,
+    id: code,
     phase: 'waiting',
     maxPlayers,
     minPlayers,
     players: [],
+    hostId: null,
+    lobbyDeadline: null,
+    nextJoinSeq: 1,
     passage: null,
     startAt: null,
     finishCount: 0,
@@ -45,8 +56,8 @@ function resetRaceFields(player, passageLength) {
   player.place = null;
 }
 
-function createPlayer(id, socketId, slot) {
-  const player = { id, socketId, slot, connected: true, ready: true };
+function createPlayer(id, socketId, slot, joinSeq) {
+  const player = { id, socketId, slot, joinSeq, connected: true, ready: true, inRace: false };
   resetRaceFields(player, 0);
   return player;
 }
@@ -73,29 +84,58 @@ function addPlayer(room, { id, socketId }) {
   if (room.phase === 'countdown' || room.phase === 'racing') {
     return { ok: false, code: ERROR_CODES.RACE_IN_PROGRESS };
   }
-  const player = createPlayer(id, socketId, lowestFreeSlot(room));
+  const player = createPlayer(id, socketId, lowestFreeSlot(room), room.nextJoinSeq);
+  room.nextJoinSeq += 1;
   room.players.push(player);
   sortBySlot(room);
+  if (room.hostId === null) room.hostId = player.id;
   return { ok: true, player };
 }
 
+function isHost(room, playerId) {
+  return room.hostId !== null && room.hostId === playerId;
+}
+
 /**
- * During a race the player stays in the room as disconnected, so their
- * frozen numbers still appear in the results. Otherwise they are removed.
- * `removed` is true when the player left the array; `player` is null if
- * the socket was not in the room.
+ * Keeps the host while it is a connected member; otherwise passes it to the
+ * connected player who joined earliest (smallest joinSeq), or null. Join
+ * order, not slot: slots are reused, so a later joiner in a freed slot must
+ * not jump the queue. Returns true if hostId changed.
+ */
+function reassignHost(room) {
+  const current = room.players.find((p) => p.id === room.hostId);
+  if (current && current.connected) return false;
+
+  let next = null;
+  for (const player of room.players) {
+    if (player.connected && (next === null || player.joinSeq < next.joinSeq)) next = player;
+  }
+  const nextId = next ? next.id : null;
+  const changed = nextId !== room.hostId;
+  room.hostId = nextId;
+  return changed;
+}
+
+/**
+ * During a race a racer stays in the room as disconnected, so their frozen
+ * numbers still appear in the results. Anyone else (including a player
+ * sitting out the race) is removed. `removed` is true when the player left
+ * the array; `player` is null if the socket was not in the room. The host is
+ * passed on in every branch.
  */
 function removePlayer(room, socketId, now) {
   const player = findPlayer(room, socketId);
   if (!player) return { removed: false, player: null };
 
-  if (room.phase === 'racing') {
+  if (room.phase === 'racing' && player.inRace) {
     player.connected = false;
     player.leftAt = now;
     room.dirty = true;
+    reassignHost(room);
     return { removed: false, player };
   }
   room.players = room.players.filter((p) => p !== player);
+  reassignHost(room);
   return { removed: true, player };
 }
 
@@ -110,33 +150,75 @@ function connectedPlayers(room) {
   return room.players.filter((player) => player.connected);
 }
 
-/* ---------- Phase transitions ---------- */
-
-/** The start check from PROTOCOL.md section 3. */
-function shouldStartCountdown(room) {
-  if (room.phase !== 'waiting' && room.phase !== 'finished') return null;
-  const allReady = room.players.length > 0 && room.players.every((player) => player.ready);
-  if (allReady && room.players.length >= room.minPlayers) return 'countdown';
-  if (room.phase === 'finished' && allReady) return 'waiting';
-  return null;
+/** Players in the current (or last) race. */
+function racers(room) {
+  return room.players.filter((player) => player.inRace);
 }
 
-/** `passage` is a string; it is stored as an array of chars like generateChars. */
+function hasConnectedRacer(room) {
+  return room.players.some((player) => player.inRace && player.connected);
+}
+
+/** Entering waiting: nobody is in a race and everyone is a lobby player. */
+function seatNobody(room) {
+  for (const player of room.players) {
+    player.inRace = false;
+    player.ready = true;
+  }
+}
+
+/* ---------- Phase transitions ---------- */
+
+/** The return check from PROTOCOL.md section 3. It never starts a countdown. */
+function shouldReturnToWaiting(room) {
+  return (
+    room.phase === 'finished' && room.players.length > 0 && room.players.every((player) => player.ready)
+  );
+}
+
+/** The start check from PROTOCOL.md section 3, errors in protocol order. */
+function canStart(room, playerId) {
+  if (!isHost(room, playerId)) return { ok: false, code: ERROR_CODES.NOT_HOST };
+  if (room.phase === 'countdown' || room.phase === 'racing') {
+    return { ok: false, code: ERROR_CODES.RACE_IN_PROGRESS };
+  }
+  if (room.players.length < room.minPlayers) return { ok: false, code: ERROR_CODES.NOT_ENOUGH_PLAYERS };
+  // The host's room:start counts as the host's own "Race again".
+  if (
+    room.phase === 'finished' &&
+    room.players.filter((p) => p.ready || p.id === playerId).length < room.minPlayers
+  ) {
+    return { ok: false, code: ERROR_CODES.PLAYERS_NOT_READY };
+  }
+  return { ok: true };
+}
+
+/**
+ * Seats the racers (the ready players plus the host; in waiting that is
+ * everyone), then makes every player ready: players who had not pressed
+ * "Race again" now sit out and are lobby players for the next race.
+ * `passage` is a string; it is stored as an array of chars like generateChars.
+ */
 function beginCountdown(room, passage, now, countdownMs) {
+  for (const player of room.players) {
+    player.inRace = player.ready || player.id === room.hostId;
+    player.ready = true;
+  }
   room.phase = 'countdown';
   room.passage = passage.split('');
   room.startAt = now + countdownMs;
   room.finishCount = 0;
   room.dirty = false;
-  for (const player of room.players) resetRaceFields(player, room.passage.length);
+  for (const player of racers(room)) resetRaceFields(player, room.passage.length);
 }
 
-/** Back to waiting when a player leaves during the countdown. */
+/** Back to waiting when too few racers are left during the countdown. */
 function cancelCountdown(room) {
   room.phase = 'waiting';
   room.passage = null;
   room.startAt = null;
   room.finishCount = 0;
+  seatNobody(room);
 }
 
 /**
@@ -151,6 +233,22 @@ function beginRace(room, now) {
 
 function markWaiting(room) {
   room.phase = 'waiting';
+  seatNobody(room);
+}
+
+/**
+ * racing -> waiting when every racer has gone but players who sat out
+ * remain. No results: the race simply stops.
+ */
+function abandonRace(room) {
+  room.phase = 'waiting';
+  room.passage = null;
+  room.startAt = null;
+  room.finishCount = 0;
+  room.dirty = false;
+  room.players = room.players.filter((player) => player.connected);
+  seatNobody(room);
+  reassignHost(room);
 }
 
 /* ---------- Typing ---------- */
@@ -190,7 +288,8 @@ function hasCompletedPassage(room, player) {
  * position and the finish.
  */
 function applyKeys(room, player, keys, now) {
-  if (room.phase !== 'racing' || !player.connected || player.finishedAt !== null) {
+  // A player sitting out can never move, finish or affect the race.
+  if (room.phase !== 'racing' || !player.inRace || !player.connected || player.finishedAt !== null) {
     return { changed: false, finished: false };
   }
 
@@ -211,10 +310,10 @@ function applyKeys(room, player, keys, now) {
   return { changed, finished: false };
 }
 
-/** At least one connected player, and every connected player has finished. */
+/** At least one connected racer, and every connected racer has finished. */
 function isRaceOver(room) {
-  const connected = connectedPlayers(room);
-  return connected.length > 0 && connected.every((player) => player.finishedAt !== null);
+  const live = racers(room).filter((player) => player.connected);
+  return live.length > 0 && live.every((player) => player.finishedAt !== null);
 }
 
 /* ---------- Scoring ---------- */
@@ -257,11 +356,11 @@ function progressPercent(room, player) {
   return clamp(Math.floor((player.correctCount * 100) / room.passage.length), 0, 100);
 }
 
-/** Payload for race:update. */
+/** Payload for race:update (racers only). */
 function buildProgress(room, now) {
   return {
     elapsedMs: Math.max(0, Math.round(now - room.startAt)),
-    players: room.players.map((player) => {
+    players: racers(room).map((player) => {
       const stats = statsFor(room, player, now);
       return {
         id: player.id,
@@ -304,9 +403,9 @@ function compareResults(a, b) {
   return a.slot - b.slot;
 }
 
-/** Payload `results` for race:end (PROTOCOL.md section 6). */
+/** Payload `results` for race:end (PROTOCOL.md section 6), racers only. */
 function buildResults(room, now) {
-  const entries = room.players.map((player) => {
+  const entries = racers(room).map((player) => {
     const stats = statsFor(room, player, now);
     return {
       id: player.id,
@@ -336,19 +435,36 @@ function buildResults(room, now) {
   }));
 }
 
-/** Phase finished, drop disconnected players, everyone must press rematch. */
+/**
+ * Phase finished, drop disconnected players; every racer must press
+ * "Race again". Players who sat out stay ready (already in the lobby).
+ */
 function endRace(room) {
   room.phase = 'finished';
   room.players = room.players.filter((player) => player.connected);
-  for (const player of room.players) player.ready = false;
+  for (const player of room.players) {
+    if (player.inRace) player.ready = false;
+  }
   room.dirty = false;
+  reassignHost(room);
 }
 
-/** RoomSnapshot (PROTOCOL.md section 5). Never includes socket ids. */
-function toSnapshot(room) {
+/**
+ * RoomSnapshot (PROTOCOL.md section 5). Never includes socket ids, joinSeq
+ * or IPs. `now` gives the lobby time left.
+ */
+function toSnapshot(room, now) {
+  const expiresInMs =
+    room.phase === 'waiting' && room.lobbyDeadline !== null
+      ? Math.max(0, Math.round(room.lobbyDeadline - now))
+      : null;
   return {
+    code: room.id,
     phase: room.phase,
     maxPlayers: room.maxPlayers,
+    minPlayers: room.minPlayers,
+    hostId: room.hostId,
+    expiresInMs,
     players: [...room.players]
       .sort((a, b) => a.slot - b.slot)
       .map((player) => ({
@@ -356,7 +472,9 @@ function toSnapshot(room) {
         slot: player.slot,
         connected: player.connected,
         ready: player.ready,
-        finished: player.finishedAt !== null,
+        inRace: player.inRace,
+        // finishedAt can be left over from an earlier race; only a racer counts.
+        finished: player.inRace && player.finishedAt !== null,
       })),
   };
 }
@@ -368,11 +486,17 @@ module.exports = {
   setReady,
   findPlayer,
   connectedPlayers,
-  shouldStartCountdown,
+  racers,
+  hasConnectedRacer,
+  isHost,
+  reassignHost,
+  shouldReturnToWaiting,
+  canStart,
   beginCountdown,
   cancelCountdown,
   beginRace,
   markWaiting,
+  abandonRace,
   applyKeys,
   isRaceOver,
   buildProgress,

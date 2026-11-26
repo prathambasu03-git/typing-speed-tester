@@ -221,12 +221,25 @@ kbd {
   filter: brightness(1.08);
 }
 
-/* "Waiting for opponent…" after Race again. Colors stay unchanged so the text
-   keeps its contrast; the label itself says why the button does nothing. */
+/* Start race before it can start, and "Going back…" after Race again: an
+   outline instead of the accent fill, so it no longer looks pressable. Dashed,
+   so it is not mistaken for an enabled secondary button's solid border. The
+   text keeps 4.5:1 and the outline 3:1 in both themes. */
 .primary-btn[aria-disabled="true"],
 .primary-btn[aria-disabled="true"]:hover {
   cursor: not-allowed;
   filter: none;
+  background: transparent;
+  color: var(--text);
+  outline: 2px dashed var(--text-dim);
+  outline-offset: -2px;
+}
+
+/* The dashed outline above outranks :focus-visible; the usual ring returns
+   on focus, since the button stays focusable (aria-disabled, not disabled). */
+.primary-btn[aria-disabled="true"]:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .secondary-btn {
@@ -234,7 +247,8 @@ kbd {
   width: 100%;
   margin-top: 0.75rem;
   padding: 0.8rem 1rem;
-  border: 1px solid var(--border);
+  /* --text-dim, not --border: a button's edge needs 3:1 to be seen as one. */
+  border: 1px solid var(--text-dim);
   border-radius: var(--radius);
   background: transparent;
   color: var(--text);
@@ -244,6 +258,13 @@ kbd {
 
 .secondary-btn:hover {
   border-color: var(--accent);
+}
+
+/* A pending Stay in room: no hover highlight on a button that does nothing. */
+.secondary-btn[aria-disabled="true"],
+.secondary-btn[aria-disabled="true"]:hover {
+  cursor: not-allowed;
+  border-color: var(--text-dim);
 }
 
 /* ==========================================================================
@@ -623,6 +644,146 @@ body[data-phase="idle"] .caret {
   font-weight: 700;
 }
 
+/* ---------- Invite banner, multiplayer menu and room lobby ---------- */
+
+/* The heading above already leaves a gap. */
+#create-room-btn {
+  margin-top: 0;
+}
+
+.menu-error {
+  margin-top: 0.5rem;
+}
+
+.mp-menu-or {
+  margin: 1rem 0 0.5rem;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.join-form {
+  margin: 0;
+}
+
+.field-label {
+  display: block;
+  color: var(--text);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+#room-code-hint {
+  margin-bottom: 0.5rem;
+}
+
+/* Input and Join share a row that wraps, so nothing overflows at 360px. */
+.join-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.join-row .code-input {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+
+#join-room-btn {
+  flex: 0 0 auto;
+  width: auto;
+  margin-top: 0;
+  min-height: 44px;
+}
+
+/* --text-dim borders give the fields 3:1 against the card and the page in
+   both themes; --border is too faint for a form field boundary. 1rem text
+   stops iOS from zooming on focus. */
+.code-input,
+.link-input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--text-dim);
+  border-radius: var(--radius);
+  padding: 0.625rem 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  min-height: 44px;
+}
+
+.code-input {
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+}
+
+.link-input {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.code-input[aria-invalid="true"] {
+  border-color: var(--error);
+}
+
+.field-error {
+  color: var(--error);
+  margin: 0.5rem 0 0;
+}
+
+.room-info,
+.room-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.room-actions {
+  margin: 1rem 0 0;
+}
+
+/* The buttons stack with the flex gap instead of their own margins. */
+.room-actions .primary-btn,
+.room-actions .secondary-btn {
+  margin-top: 0;
+}
+
+/* Code and Copy share a row; below about 400px Copy wraps to its own line. */
+.room-code-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+
+.room-code-line {
+  margin: 0;
+  color: var(--text-dim);
+}
+
+.copy-btn {
+  flex: 0 0 auto;
+  width: auto;
+  margin-top: 0;
+  min-height: 44px;
+}
+
+.room-code {
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  letter-spacing: 0.2em;
+  color: var(--text);
+}
+
+#invite-text .room-code {
+  font-size: 1rem;
+}
+
+#start-hint {
+  margin: 0;
+}
+
 /* ==========================================================================
    9. History
    ========================================================================== */
@@ -696,6 +857,12 @@ body[data-phase="idle"] .caret {
     grid-column: 1 / -1;
     text-align: left;
     font-size: 0.8rem;
+  }
+}
+
+@media (max-width: 400px) {
+  .copy-btn {
+    width: 100%;
   }
 }
 

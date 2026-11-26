@@ -28,13 +28,51 @@ function readMetaContent(html = read('index.html')) {
   return (html.match(META_PATTERN) || [])[1];
 }
 
-/** id -> whether the element carries the `hidden` attribute in index.html. */
+const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+
+/**
+ * id -> { tag, hidden, parentId } for every element with an id in index.html.
+ * parentId is the nearest ancestor that has an id (or null), so the fake DOM
+ * can answer contains() for nested elements, as isFocusIn() needs.
+ */
 function idsFromHtml(html) {
+  const body = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
   const ids = new Map();
-  for (const match of html.matchAll(/<[a-zA-Z][^>]*\sid="([^"]+)"[^>]*>/g)) {
-    ids.set(match[1], /\shidden(?=[\s>=])/.test(match[0]));
+  const stack = []; // open elements: { tag, id }
+  for (const match of body.matchAll(/<(\/?)([a-zA-Z][\w-]*)([^>]*)>/g)) {
+    const [, closing, rawTag, attrs] = match;
+    const tag = rawTag.toLowerCase();
+    if (closing) {
+      const at = stack.map((open) => open.tag).lastIndexOf(tag);
+      if (at >= 0) stack.length = at;
+      continue;
+    }
+    const idMatch = attrs.match(/\sid="([^"]+)"/);
+    const id = idMatch ? idMatch[1] : null;
+    if (id !== null) {
+      let parentId = null;
+      for (let i = stack.length - 1; i >= 0; i -= 1) {
+        if (stack[i].id !== null) { parentId = stack[i].id; break; }
+      }
+      ids.set(id, { tag, hidden: /\shidden(?=[\s=/]|$)/.test(attrs), parentId });
+    }
+    if (!VOID_TAGS.has(tag) && !attrs.trim().endsWith('/')) stack.push({ tag, id });
   }
   return ids;
+}
+
+/** Stands in for the browser's Element, so `instanceof Element` checks work. */
+class FakeElement {}
+
+/** Matches one simple selector: a tag name or a [data-*] attribute. */
+function matchesSimple(node, selector) {
+  const data = /^\[data-([a-z-]+)\]$/.exec(selector);
+  if (data) {
+    const key = data[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    return Boolean(node.dataset) && key in node.dataset;
+  }
+  if (/^[a-z]+$/.test(selector)) return node.tagName === selector.toUpperCase();
+  return false;
 }
 
 function createClassList() {
@@ -61,6 +99,8 @@ function createElement(tagName, extra = {}, owner = { document: null }) {
     hidden: false,
     disabled: false,
     removed: false,
+    selected: false,
+    parentNode: null,
     children: [],
     attributes: {},
     listeners: {},
@@ -79,17 +119,34 @@ function createElement(tagName, extra = {}, owner = { document: null }) {
       this.listeners[type] = (this.listeners[type] || []).filter((f) => f !== fn);
     },
     appendChild(child) {
-      if (child && child.isFragment) this.children.push(...child.children);
-      else this.children.push(child);
+      const added = child && child.isFragment ? child.children : [child];
+      for (const node of added) {
+        if (node && typeof node === 'object') node.parentNode = this;
+        this.children.push(node);
+      }
+      if (child && child.isFragment) child.children = [];
       return child;
     },
+    append(...nodes) { for (const node of nodes) this.appendChild(node); },
     replaceChildren(...nodes) {
       this.children = [];
       for (const node of nodes) this.appendChild(node);
     },
     remove() { this.removed = true; },
-    contains(other) { return other === this || this.children.includes(other); },
-    closest() { return null; },
+    /** True for this element and any descendant (through parentNode links). */
+    contains(other) {
+      for (let node = other; node; node = node.parentNode) if (node === this) return true;
+      return false;
+    },
+    /** Comma-separated tag names or [data-*] selectors, on this and its ancestors. */
+    closest(selector) {
+      const parts = String(selector).split(',').map((part) => part.trim());
+      for (let node = this; node; node = node.parentNode) {
+        if (parts.some((part) => matchesSimple(node, part))) return node;
+      }
+      return null;
+    },
+    select() { this.selected = true; },
     focus() { owner.document.activeElement = this; },
     blur() { if (owner.document.activeElement === this) owner.document.activeElement = null; },
     setSelectionRange() {},
@@ -98,6 +155,7 @@ function createElement(tagName, extra = {}, owner = { document: null }) {
     },
     ...extra,
   };
+  Object.setPrototypeOf(el, FakeElement.prototype);
   return el;
 }
 
@@ -150,11 +208,21 @@ function createClock() {
  * @param {string|null} [options.metaContent] typing-server-url meta content;
  *          omitted = read from index.html, null = no meta tag at all
  * @param {string}  [options.scriptSource]   replacement source for script.js
- * @returns {{ ctx, elements, document, window, clock, modeButtons, error }}
+ * @param {string}  [options.pathname]       window.location.pathname ('/')
+ * @param {string}  [options.search]         window.location.search ('')
+ * @param {string}  [options.hash]           window.location.hash ('')
+ * @param {object}  [options.navigator]      the navigator global ({}: no clipboard)
+ * @param {boolean} [options.withElement]   false = no global Element (default true)
+ * @param {boolean} [options.isSecureContext] window.isSecureContext
+ *          (default: true on an https: or localhost page)
+ * @returns {{ ctx, elements, document, window, history, clock, modeButtons, error }}
  *          error is the thrown value, or null when every script ran cleanly.
  */
 function loadApp(options = {}) {
-  const { withMultiplayer, hostname = 'localhost', protocol = 'http:', scriptSource } = options;
+  const {
+    withMultiplayer, hostname = 'localhost', protocol = 'http:', scriptSource,
+    pathname = '/', search = '', hash = '', navigator = {}, withElement = true,
+  } = options;
   const html = read('index.html');
   let metaUrl;
   if (options.metaContent === undefined) metaUrl = readMetaContent(html);
@@ -165,9 +233,10 @@ function loadApp(options = {}) {
   const make = (tag, extra) => createElement(tag, extra, owner);
 
   const elements = new Map();
-  for (const [id, hidden] of idsFromHtml(html)) {
-    const el = make('div', { id, hidden });
-    elements.set(id, el);
+  const parsed = idsFromHtml(html);
+  for (const [id, { tag, hidden }] of parsed) elements.set(id, make(tag, { id, hidden }));
+  for (const [id, { parentId }] of parsed) {
+    if (parentId !== null) elements.get(id).parentNode = elements.get(parentId);
   }
   const buttons = (attr, values) => values.map((v) => {
     const b = make('button');
@@ -177,7 +246,8 @@ function loadApp(options = {}) {
   const modeButtons = buttons('mode', ['solo', 'multi']);
   const durationButtons = buttons('duration', ['15', '30', '60']);
   // Inside #mode, so the click delegation's dom.mode.contains(button) holds.
-  if (elements.has('mode')) elements.get('mode').children.push(...modeButtons);
+  if (elements.has('mode')) elements.get('mode').append(...modeButtons);
+  if (elements.has('settings')) elements.get('settings').append(...durationButtons);
 
   const document = {
     documentElement: make('html'),
@@ -214,9 +284,31 @@ function loadApp(options = {}) {
   };
 
   const clock = createClock();
-  const href = protocol === 'file:' ? 'file:///index.html' : `${protocol}//${hostname}/`;
+  const href = protocol === 'file:'
+    ? `file:///index.html${search}${hash}`
+    : `${protocol}//${hostname}${pathname}${search}${hash}`;
+  const location = {
+    hostname, protocol, href, pathname: protocol === 'file:' ? '/index.html' : pathname, search, hash,
+  };
+  // Records replaceState URLs and applies them to location, as browsers do
+  // (without firing hashchange).
+  const history = {
+    calls: [],
+    replaceState(stateObj, title, url) {
+      history.calls.push(String(url));
+      const next = new URL(String(url), location.href);
+      location.href = next.href;
+      location.pathname = next.pathname;
+      location.search = next.search;
+      location.hash = next.hash;
+    },
+  };
+  const isSecureContext = options.isSecureContext ?? (protocol === 'https:' || hostname === 'localhost');
   const window = {
-    location: { hostname, protocol, href },
+    location,
+    history,
+    navigator,
+    isSecureContext,
     listeners: {},
     addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
     removeEventListener() {},
@@ -229,6 +321,8 @@ function loadApp(options = {}) {
     localStorage,
     console,
     URL, // browser global used by multiplayer.js
+    ...(withElement ? { Element: FakeElement } : {}),
+    navigator,
     performance: { now: clock.now },
     requestAnimationFrame: clock.requestAnimationFrame,
     cancelAnimationFrame: clock.cancelAnimationFrame,
@@ -251,7 +345,7 @@ function loadApp(options = {}) {
     error = err;
   }
 
-  return { ctx, elements, document, window, clock, modeButtons, error };
+  return { ctx, elements, document, window, history, clock, modeButtons, error };
 }
 
 module.exports = { loadApp, readMetaContent };

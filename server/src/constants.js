@@ -1,29 +1,52 @@
 'use strict';
 
-/* Protocol constants (docs/PROTOCOL.md section 2). The timing values are
-   defaults; createServer(options) may override them so tests can use short
-   timers. */
+/* Protocol constants (docs/PROTOCOL.md section 2). The timing values, room
+   limits and per-IP limits are defaults; createServer(options) may override
+   them so tests can use short timers and small caps. */
 
 const ERROR_CODES = Object.freeze({
   BAD_PAYLOAD: 'BAD_PAYLOAD',
   RATE_LIMITED: 'RATE_LIMITED',
+  ALREADY_JOINED: 'ALREADY_JOINED',
+  BAD_CODE: 'BAD_CODE',
+  ROOM_NOT_FOUND: 'ROOM_NOT_FOUND',
   ROOM_FULL: 'ROOM_FULL',
   RACE_IN_PROGRESS: 'RACE_IN_PROGRESS',
-  ALREADY_JOINED: 'ALREADY_JOINED',
+  TOO_MANY_ROOMS: 'TOO_MANY_ROOMS',
   NOT_IN_ROOM: 'NOT_IN_ROOM',
+  NOT_HOST: 'NOT_HOST',
+  NOT_ENOUGH_PLAYERS: 'NOT_ENOUGH_PLAYERS',
+  PLAYERS_NOT_READY: 'PLAYERS_NOT_READY',
+  NOT_WAITING: 'NOT_WAITING',
   NOT_FINISHED: 'NOT_FINISHED',
   IDLE_TIMEOUT: 'IDLE_TIMEOUT',
+  ROOM_EXPIRED: 'ROOM_EXPIRED',
   INTERNAL: 'INTERNAL',
 });
 
 module.exports = Object.freeze({
-  ROOM_ID: 'main',
-  MAX_PLAYERS: 2,
+  MAX_PLAYERS: 4,
   MIN_PLAYERS: 2,
+  MAX_ROOMS: 200,
+  ROOM_CODE_LENGTH: 6,
+  // 30 symbols: no 0, 1, I, L, O (look-alikes) and no U (avoids accidental words).
+  ROOM_CODE_ALPHABET: 'ABCDEFGHJKMNPQRSTVWXYZ23456789',
+  ROOM_CODE_INPUT_MAX: 16,
+  ROOM_CODE_MAX_ATTEMPTS: 10,
   COUNTDOWN_MS: 3000,
   RACE_TIME_LIMIT_MS: 120000,
   REMATCH_TIMEOUT_MS: 60000,
+  LOBBY_TIMEOUT_MS: 600000,
   JOIN_TIMEOUT_MS: 10000,
+  CREATE_LIMIT_CAPACITY: 3,
+  CREATE_LIMIT_REFILL_PER_SEC: 0.05,
+  JOIN_FAIL_LIMIT_CAPACITY: 10,
+  JOIN_FAIL_LIMIT_REFILL_PER_SEC: 1 / 6,
+  IP_LIMIT_MAX_ENTRIES: 10000,
+  IP_LIMIT_SWEEP_MS: 60000,
+  // A full table forces a sweep at most this often, so a flood of new IPs
+  // cannot make every request walk all IP_LIMIT_MAX_ENTRIES buckets.
+  IP_LIMIT_FORCED_SWEEP_MIN_MS: 1000,
   PASSAGE_WORD_COUNT: 30,
   PASSAGE_MAX_LENGTH: 1000,
   MAX_KEYS_PER_EVENT: 64,

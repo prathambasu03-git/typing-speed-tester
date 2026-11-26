@@ -1,6 +1,8 @@
 # Typing Speed Tester
 
-A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, plus a real-time two-player race mode (beta) backed by a small Node.js and Socket.io server. The browser app has no frameworks, no build step and no dependencies. It comes with 529 client tests and 233 server tests, all run with Node's built-in test runner.
+A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, plus a real-time race mode (beta) for 2 to 4 players in private rooms, backed by a small Node.js and Socket.io server. The browser app has no frameworks, no build step and no dependencies. It comes with 972 client tests and 411 server tests, all run with Node's built-in test runner.
+
+**Racing alone?** Press **Multiplayer**, create a room, copy the invite link and open it in a second tab to race yourself.
 
 **Live demo:** [https://prathambasu03-git.github.io/typing-speed-tester/](https://prathambasu03-git.github.io/typing-speed-tester/) (solo and multiplayer. The first multiplayer connection after the server has been idle can take about a minute while the free Render instance wakes up.)
 
@@ -22,14 +24,18 @@ A keyboard-first typing speed test built with vanilla HTML, CSS and JavaScript, 
 
 ### Multiplayer (beta)
 
-- Two players in one room race the same 30-word passage and see each other's live progress
-- The race starts automatically once two players are in, after a 3-second countdown
+- **Private rooms by code.** Press **Multiplayer**, then **Create a room**, or type a 6-character code and press **Join room**. Codes use letters and digits without look-alikes (no 0, 1, I, L, O or U). They are case-insensitive, and spaces and hyphens are ignored, so `k7q-m2x` works
+- **Invite links.** After you create a room, its code shows with a **Copy invite link** button, for example `https://prathambasu03-git.github.io/typing-speed-tester/#room=K7QM2X`. Opening the link shows an invite banner with a **Join room** button. Nothing contacts the server until you press it
+- **Racing alone?** Create a room, copy the invite link and open it in a second tab to race yourself. The lobby shows the same tip while you are the only player
+- **2 to 4 players with a host.** The room's creator is the host and presses **Start race**, which stays disabled until at least 2 players are in. If the host leaves, in the lobby or mid-race, the player who joined next becomes host and everyone is told. A fifth player gets a clear "room is full" message
+- Everyone races the same 30-word passage after a 3-second countdown and sees each other's live progress
 - You finish only when every character is correct, so mashing keys cannot win
 - Results show each player's place, WPM, accuracy and time, all computed by the server
-- **Race again** starts a rematch, with a new passage and a new countdown
-- A sleeping free-tier server can take about a minute to wake. After 3 seconds the page says it is waking the server (with a small spinner, and **Solo** cancels), waits up to 90 seconds, then falls back to solo with a clear message
-- If the server cannot be reached, the page says so and falls back to solo
+- **Rematches.** After a race, players press **Race again** to go back to the room. The host can start the next race with whoever has pressed it. Anyone still on their results sits that race out and joins the next one
+- **Lobby timeout.** An idle lobby closes after 10 minutes so the free server can sleep. A warning comes 1 minute before, with a **Stay in room** button
 - After a race, a player who does not press **Race again** within 60 seconds leaves the room. The page shows a notice and a spoken warning first
+- A sleeping free-tier server can take about a minute to wake. Pressing **Multiplayer** starts loading the connection script in the background while you choose. After 3 seconds of waiting the page says it is waking the server (with a small spinner, and **Solo** cancels), waits up to 90 seconds, then falls back to solo with a clear message
+- If the server cannot be reached, the page says so and falls back to solo
 
 Multiplayer results are not saved to your solo history or personal bests.
 
@@ -47,18 +53,23 @@ Multiplayer results are not saved to your solo history or personal bests.
 
 ### Real-time multiplayer
 
+- **Private rooms with secure codes.** Room codes are 6 characters from a 30-character alphabet (729 million combinations), generated with `crypto.randomInt` and retried on a collision. The server holds up to 200 rooms in memory.
+- **Brute-force protection.** Per-IP token-bucket limits on creating rooms and on failed joins make guessing codes impractical. IPv6 addresses are grouped by /64, so one host cannot dodge the limits by rotating addresses. The limiters use no timers; they sweep idle entries lazily and cap how many IPs they track.
+- **Host succession by join order.** When the host leaves, in any phase, the host role passes to the connected player who has been in the room longest. A freed slot cannot let a later joiner jump the queue.
+- **Room lifecycle as a state machine.** Rooms move through `waiting`, `countdown`, `racing` and `finished`, with a lobby timer, a rematch timer and sit-out rules for players who are still on their results. Every timer is cleared on every transition out of its phase.
+- **Privacy-minded invite links.** The code goes in the URL hash (`#room=K7QM2X`), which browsers never send to the web server, so codes do not end up in GitHub's logs or in `Referer` headers. The page never connects because of a link alone.
 - **Real-time networking with Socket.io.** The client loads the Socket.io script from the game server only when Multiplayer is pressed. Keystrokes are batched (at most one progress event every 150 ms), and the server broadcasts progress every 200 ms.
 - **Server-authoritative design.** The client sends only keystrokes. The server replays them against its own copy of the passage and decides what is correct, when a player finishes, and the WPM, accuracy, time and finish order. Scores or times sent by a client are ignored.
 - **Shared logic.** The server reuses the browser's `stats.js` and `words.js`, so WPM and accuracy come from the same code on both sides.
 - **Protocol design.** Every Socket.io event (name, direction, payload shape, limits and error codes) is specified in [`docs/PROTOCOL.md`](docs/PROTOCOL.md), and both sides implement it.
-- **Defensive server.** Payload validation, a per-socket rate limit (token bucket), a per-IP connection cap that reads the real client IP behind a reverse proxy (`TRUST_PROXY_HOPS`, so players are not all counted as the proxy's address), a 4 KB message size limit, CORS restricted to the GitHub Pages origin and localhost, a 10-second join timeout and a 60-second idle removal after a race.
+- **Defensive server.** Payload validation, a per-socket rate limit (token bucket), a per-IP connection cap that reads the real client IP behind a reverse proxy (`TRUST_PROXY_HOPS`, so players are not all counted as the proxy's address), a 4 KB message size limit, CORS restricted to the GitHub Pages origin and localhost, a 10-second join timeout, a 10-minute lobby timeout and a 60-second idle removal after a race.
 - **Deployed on Render.** A Render Blueprint ([`render.yaml`](render.yaml)) describes the WebSocket server on Render's free tier, with a health check, a pinned Node version and build filters so client-only pushes do not restart it. The client handles the free tier's cold start. It runs at https://typing-speed-tester-server.onrender.com; see [Deploy the game server](#deploy-the-game-server).
 
 ### Quality
 
 - **Accessibility to WCAG 2.2 AA**, including live updates that do not flood a screen reader. See [Accessibility](#accessibility).
 - **Responsive design** down to 360px wide, with no horizontal scrolling.
-- **Automated tests.** The client suite uses only Node built-ins (`node:test`, `node:assert/strict`, `node:vm`). The server suite uses `node:test` and `socket.io-client`, including simulated two-client races.
+- **Automated tests.** The client suite uses only Node built-ins (`node:test`, `node:assert/strict`, `node:vm`). The server suite uses `node:test` and `socket.io-client`, including simulated races and lobbies with up to five real clients.
 
 ## How it works
 
@@ -88,18 +99,22 @@ idle ──first valid key──▶ running ──timer hits 0──▶ finished
 Multiplayer reuses the same `state` object with `mode: 'multi'`:
 
 ```
-connecting ──▶ waiting ──▶ countdown ──▶ running ──▶ finished
-                  ▲            ▲                        │
-                  │            └──── Race again ────────┤
-                  └────────── opponent left ────────────┘
+menu ──Create / Join──▶ connecting ──▶ waiting ──host: Start race──▶ countdown ──▶ running ──▶ finished
+                                          ▲                                                       │
+                                          └──── Race again (or the host starts without you) ──────┘
 ```
+
+On the server, a room moves through `waiting → countdown → racing → finished`. From `finished` the host can go straight to a new `countdown` with the players who pressed **Race again**, or the room returns to `waiting` once everyone has pressed it.
 
 ### Multiplayer flow
 
-1. Pressing **Multiplayer** loads `<server-url>/socket.io/socket.io.js` and opens a WebSocket connection. Pages on `localhost` always use `http://localhost:3000`. Elsewhere the server URL comes from `<meta name="typing-server-url">` in `index.html`; on the live site that is the Render server (in a fork, the placeholder `REPLACE_WITH_RENDER_URL` keeps the page solo-only). Pages opened from `file://` are always solo-only. If the server is asleep, the client waits up to 90 seconds for it to wake.
-2. The player joins the single room. When two players are in, the server sends a 3-second countdown with the passage, then the start signal.
-3. While typing, the client sends batches of keystrokes (Backspace included). The server replays them, keeps each player's position and keystroke counts, and broadcasts everyone's progress.
-4. The race ends when both players finish or after 2 minutes. The server sends the results and finish order.
+1. **Menu.** Pressing **Multiplayer** shows the menu and starts loading `<server-url>/socket.io/socket.io.js` in the background, which also wakes a sleeping server. Pages on `localhost` always use `http://localhost:3000`. Elsewhere the server URL comes from `<meta name="typing-server-url">` in `index.html`; on the live site that is the Render server (in a fork, the placeholder `REPLACE_WITH_RENDER_URL` keeps the page solo-only). Pages opened from `file://` are always solo-only.
+2. **Create or join.** The socket connects only when the player presses **Create a room** or **Join room** (from the menu or from an invite banner). If the server is asleep, the client waits up to 90 seconds for it to wake. The server answers with a new room code, or adds the player to the room with that code.
+3. **Lobby.** The room shows its code, the invite link and the players. The invite link is also put in the address bar. The server sends a room snapshot after every change: joins, leaves, host changes and the lobby time left.
+4. **Host start.** The host presses **Start race** once at least 2 players are in. The server picks the passage and sends a 3-second countdown, then the start signal.
+5. **Race.** While typing, the client sends batches of keystrokes (Backspace included). The server replays them, keeps each player's position and keystroke counts, and broadcasts everyone's progress.
+6. **Results.** The race ends when every racer finishes or after 2 minutes. The server sends the results and finish order.
+7. **Race again.** Players press **Race again** to return to the room. The host can start the next race as soon as at least 2 players (counting the host) are ready; the others sit that race out and join the next one.
 
 ### Formulas
 
@@ -122,13 +137,16 @@ All `localStorage` keys use the `typing:` prefix:
 | `typing:theme` | `light` or `dark` |
 | `typing:duration` | Last chosen duration |
 
-A record is only accepted if its WPM is 0 to 1000, its accuracy is 0 to 100, its duration is 15, 30 or 60, and its date is a finite number. Multiplayer adds no stored data.
+A record is only accepted if its WPM is 0 to 1000, its accuracy is 0 to 100, its duration is 15, 30 or 60, and its date is a finite number. Multiplayer adds no stored data; room codes live only in the URL hash and in server memory.
 
 ## Accessibility
 
 - **Keyboard:** Tab is never captured, so focus can always move. <kbd>Esc</kbd> restarts a solo test from the typing area; it never leaves a race. The Solo/Multiplayer and duration buttons expose their state with `aria-pressed`.
-- **Focus:** The typing area shows a visible focus ring. The caret hides when the area is not focused. When a race countdown starts, focus moves to the typing input so you can type at "Go". When a test or race ends, focus moves to the Results heading.
-- **Screen readers:** The input is described by a text version of the upcoming words (`aria-describedby`). A single polite live region announces key moments: results and restarts in solo; connected and waiting, countdown, "Go!", opponent halfway, each finish and race over in multiplayer. There is no per-second or per-update speech. Load and connection errors use `role="alert"`.
+- **Focus:** The typing area shows a visible focus ring. The caret hides when the area is not focused. Focus is managed at every multiplayer step: an invite link focuses **Join room** on the banner, creating a room focuses **Copy invite link**, joining focuses the room heading, and a failed join returns focus to the code input with the error shown under it. When a race countdown starts, focus moves to the typing input so you can type at "Go". When a test or race ends, focus moves to the Results heading. Joins, leaves and host changes never move focus.
+- **Screen readers:** The input is described by a text version of the upcoming words (`aria-describedby`). A single polite live region announces key moments: results and restarts in solo; the room created or joined, countdown, "Go!", each finish and race over in multiplayer. Lobby changes (a player joining or leaving, a new host) get exactly one announcement each, and repeated snapshots say nothing. There is no per-second or per-update speech. Load and connection errors use `role="alert"`.
+- **Room codes:** The visible code is hidden from screen readers and paired with a spelled-out copy ("K 7 Q M 2 X"), so it is read once, one character at a time.
+- **Start race:** While fewer than 2 players are in, the button uses `aria-disabled` instead of `disabled`, so it stays focusable. A hint linked with `aria-describedby` explains why, and pressing it announces the reason.
+- **Time limits (WCAG 2.2.1):** The lobby warns 1 minute before it closes and offers **Stay in room**. After a race, a spoken warning comes before the 60-second rematch timeout.
 - **Live progress:** Race progress bars are `aria-hidden` decoration. The same information is in the text beside each bar, for example a percentage and WPM.
 - **Contrast:** Text contrast is at least 4.5:1 in both themes.
 - **Motion:** Caret, scroll, progress bar and connecting-spinner animations are turned off when `prefers-reduced-motion` is set.
@@ -156,7 +174,13 @@ npm start --prefix server            # game server on http://localhost:3000
 npx serve -l 5000 .                  # in a second terminal, from the repo root
 ```
 
-Then open http://localhost:5000 in two browser windows (or two browsers), press **Multiplayer** in both, and race.
+Then:
+
+1. Open http://localhost:5000 and press **Multiplayer**, then **Create a room**.
+2. Press **Copy invite link** and open the link in a second window (or another browser).
+3. Press **Join room** in the second window, then **Start race** in the first, and race.
+
+Open the link in up to four windows to try a full room, or close the host's window to see the host pass to the next player.
 
 - Opening `index.html` from the file system (`file://`) is always solo-only, because such pages send `Origin: null`. Serve the folder instead.
 - Pages on `localhost` or `127.0.0.1` always use `http://localhost:3000`, whatever the meta tag says, so local development needs no edits.
@@ -177,7 +201,7 @@ npm install --prefix server
 npm test --prefix server
 ```
 
-The 529 client tests cover:
+The 972 client tests cover:
 
 - boundary validation of stored records (for example WPM 1000 is accepted, 1000.1 is not)
 - the accuracy floor, so one mistake in 250 keystrokes gives 99%
@@ -185,9 +209,19 @@ The 529 client tests cover:
 - deterministic word generation through an injected random function
 - the multiplayer helpers: server URL checks, keystroke batching, and validators that reject malformed server events
 - choosing the game server URL and the cold-start connecting flow (fake timers)
+- room codes: normalising typed input, rejecting look-alike characters, parsing `#room=` links and building invite links
+- the lobby UI flow against a fake Socket.io server: create and join, the invite banner, copying the link, the disabled Start and its hint, one announcement per change, focus at each step, host changes, sitting out a rematch, and the lobby warning with **Stay in room**
 - loading the scripts in a `node:vm` context with no `document` or `window`, which proves they are DOM-free
 
-The 233 server tests cover payload validation, origin rules, settings parsing, client IP detection behind a proxy, the rate limiter, the race state machine and scoring, timeouts, and full races between two real Socket.io clients: finishing order, time limits, a third player being turned away, disconnects mid-race and client-sent scores being ignored.
+The 411 server tests cover payload validation, origin rules, settings parsing, client IP detection behind a proxy, the rate limiters, the room state machine and scoring, and timeouts. They also run full lobbies and races between real Socket.io clients. M2 adds tests for:
+
+- room codes: alphabet, randomness source and collision retries
+- limits: the 200-room cap, per-IP create and failed-join limits, IPv6 grouped by /64, and a fifth player turned away
+- host succession by join order, in the lobby and mid-race
+- sit-out rematches: the host starting with only the players who pressed **Race again**
+- the lobby timer: expiry, **Stay in room**, and restarting on a join or after a race
+
+Earlier tests still cover finishing order, time limits, disconnects mid-race and client-sent scores being ignored.
 
 ## Project structure
 
@@ -196,15 +230,18 @@ index.html                 page structure: header, mode and duration settings, r
 style.css                  theme variables, layout, caret and race styles, responsive and reduced-motion rules
 words.js                   the word list (global WORDS, also exported for Node)
 stats.js                   pure logic: stats, validation, word generation (no DOM)
-multiplayer.js             pure multiplayer logic: URL checks, key batching, event validators (no DOM)
-script.js                  state, rendering, timer, input handling, persistence, multiplayer client
+multiplayer.js             pure multiplayer logic: URL checks, room codes, invite links, key batching, event validators (no DOM)
+script.js                  state, rendering, timer, input handling, persistence, multiplayer client and lobby
 tests/
   stats.test.js            unit tests for stats.js
   words.test.js            tests for the words.js Node export
   multiplayer.test.js      unit tests for multiplayer.js
-  script-load.test.js      checks that solo starts with and without multiplayer.js
+  script-load.test.js      checks that solo starts with and without multiplayer.js, and the invite banner
+  lobby-flow.test.js       the lobby UI flow: create, join, start, host changes, sit-outs, lobby timer
+  m2-round3.test.js        edge cases from the final review round (late rematch acks, lobby deadline shifts, dead invite links)
   helpers/
     load-script.js         shared fake-DOM loader for script.js tests
+    mp-harness.js          fake Socket.io server and helpers for the multiplayer UI tests
 docs/
   PROTOCOL.md              every Socket.io event: payloads, limits, error codes
   DEPLOY.md                step-by-step guide to deploying the game server on Render
@@ -217,15 +254,22 @@ server/
     app.js                 Express app, HTTP server and Socket.io setup
     game.js                Socket.io event handlers, timers and broadcasts
     race.js                room state machine and scoring (pure)
-    roomStore.js           in-memory room store
+    roomStore.js           in-memory room store, capped at 200 rooms
+    roomCode.js            random room codes with crypto.randomInt and collision retries (pure)
+    ipLimiter.js           per-IP token buckets for creates and failed joins, with lazy sweeping (pure)
     validate.js            payload validation (pure)
     origin.js              CORS origin rules (pure)
-    clientIp.js            real client IP behind a reverse proxy, for the per-IP cap (pure)
+    clientIp.js            real client IP behind a reverse proxy, and the per-IP limiter key (IPv6 /64)
     rateLimit.js           per-socket token bucket (pure)
     config.js              reads and checks environment settings
     constants.js           protocol constants
     shared.js              reuses the root stats.js and words.js
-  test/                    node:test suites, including two-client race simulations
+  test/                    node:test suites, including multi-client race and lobby simulations
+    roomCode.test.js       code alphabet, randomness and collision retries
+    ipLimiter.test.js      per-IP buckets, refill, lazy sweeping and the entry cap
+    lobby.flow.test.js     create, join, host start, full rooms, the lobby timer and Stay in room
+    lobby.host.test.js     host succession by join order in every phase, and sit-out rematches
+    lobby.limits.test.js   room cap, create and failed-join limits, IPv6 grouping, code collisions
 render.yaml                Render Blueprint for the game server (free tier, no secrets)
 .nojekyll                  tells GitHub Pages to serve the files as they are
 ```
@@ -258,7 +302,7 @@ Multiplayer is being built in milestones:
 
 - **M1:** one room races end to end ✓
 - **Deploy:** the game server on Render's free tier ([`render.yaml`](render.yaml), [`docs/DEPLOY.md`](docs/DEPLOY.md)) ✓
-- **M2:** lobby and room codes
+- **M2:** lobby and room codes ✓
 - **M3:** server-side anti-cheat
 - **M4:** saved results and a leaderboard
 - **Later:** Docker Compose and GitHub Actions CI
